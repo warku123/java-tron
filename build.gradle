@@ -9,12 +9,12 @@ allprojects {
 }
 def arch = System.getProperty("os.arch").toLowerCase()
 def javaVersion = JavaVersion.current()
-def isArm64 = Architectures.AARCH64.isAlias(arch)
+def isArm64 = project.hasProperty('forceArm64') ? true : Architectures.AARCH64.isAlias(arch)
 def archSource = isArm64 ? "arm" : "x86"
 def isMac = OperatingSystem.current().isMacOsX()
 
 ext.archInfo = [
-        name    : arch,
+        name    : isArm64 ? "aarch64 (forced)" : arch,
         java    : javaVersion,
         isArm64 : isArm64,
         sourceSets: [
