@@ -41,34 +41,34 @@ public class CheckPointV2StoreTest {
   public void testCloseCallsSuperClose() throws Exception {
     CheckPointV2Store store = new CheckPointV2Store("test-close-super");
     
-    // 获取父类的 writeOptions 字段
+    // Get the parent class's writeOptions field
     Field parentWriteOptionsField = TronDatabase.class.getDeclaredField("writeOptions");
     parentWriteOptionsField.setAccessible(true);
     WriteOptionsWrapper originalParentWriteOptions = (WriteOptionsWrapper) parentWriteOptionsField.get(store);
     
-    // 保存原始的 rocks 对象引用，用于后续验证
+    // Save the original rocks object reference for subsequent verification
     org.rocksdb.WriteOptions originalRocks = originalParentWriteOptions.rocks;
     
-    // 创建一个 spy 来监控父类的 writeOptions
+    // Create a spy to monitor the parent class's writeOptions
     WriteOptionsWrapper spyParentWriteOptions = spy(originalParentWriteOptions);
     parentWriteOptionsField.set(store, spyParentWriteOptions);
     
-    // 创建一个 spy 来监控 rocks.close() 方法
+    // Create a spy to monitor the rocks.close() method
     org.rocksdb.WriteOptions spyRocks = spy(originalRocks);
     spyParentWriteOptions.rocks = spyRocks;
     
-    // 验证父类的 writeOptions 和 dbSource 存在
+    // Verify that the parent class's writeOptions and dbSource exist
     Assert.assertNotNull(spyParentWriteOptions);
     Assert.assertNotNull(spyRocks);
     Assert.assertNotNull(store.getDbSource());
     
-    // 关闭 store
+    // Close the store
     store.close();
     
-    // 验证父类的 writeOptions.close() 被调用了（通过 super.close()）
+    // Verify that the parent class's writeOptions.close() was called (via super.close())
     verify(spyParentWriteOptions, times(1)).close();
     
-    // 验证 rocks.close() 被调用了（资源真正被关闭）
+    // Verify that rocks.close() was called (resources are actually closed)
     verify(spyRocks, times(1)).close();
   }
 }
