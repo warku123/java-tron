@@ -27,11 +27,20 @@ jobs:
           java-version: '8'
           distribution: 'temurin'
 
+      # Phase A note: while the system-test integration is under
+      # review, this checkout points at the warku123 fork's
+      # feat/trond-bridge branch so the new scripts/stest-up.sh and
+      # the trond-based bring-up flow can be exercised end-to-end on
+      # this fork's CI. Once tronprotocol/tron-deployment has merged
+      # the system-test-integration change and cut v0.1.0, the
+      # repository / ref below will be flipped back to
+      # tronprotocol/system-test + release_workflow as part of the
+      # Phase B switchover commit.
       - name: Clone system-test
         uses: actions/checkout@v5
         with:
-          repository: tronprotocol/system-test
-          ref: release_workflow
+          repository: warku123/system-test
+          ref: feat/trond-bridge
           path: system-test
 
       - name: Checkout java-tron
@@ -52,28 +61,14 @@ jobs:
         working-directory: java-tron
         run: ./gradlew clean build -x test --no-daemon
 
-      - name: Copy config and start FullNode
-        run: |
-          cp system-test/testcase/src/test/resources/config-system-test.conf java-tron/
-          cd java-tron
-          nohup java -jar build/libs/FullNode.jar --witness -c config-system-test.conf > fullnode.log 2>&1 &
-          echo "FullNode started, waiting for it to be ready..."
-
-          MAX_ATTEMPTS=60
-          INTERVAL=5
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            if curl -s --fail "http://localhost:8090/wallet/getblockbynum?num=1" > /dev/null 2>&1; then
-              echo "FullNode is ready! (attempt $i)"
-              exit 0
-            fi
-            echo "Waiting... (attempt $i/$MAX_ATTEMPTS)"
-            sleep $INTERVAL
-          done
-
-          echo "FullNode failed to start within $((MAX_ATTEMPTS * INTERVAL)) seconds."
-          echo "=== FullNode log (last 50 lines) ==="
-          tail -50 fullnode.log || true
-          exit 1
+      # Phase A note: trond release URL points at the warku123 fork
+      # while the system-test integration is in review. The Phase B
+      # switchover commit will repoint to
+      # tronprotocol/tron-deployment after upstream merge + release.
+      - name: Bring up the stest single-SR via trond
+        env:
+          STEST_JAR: ${{ github.workspace }}/java-tron/build/libs/FullNode.jar
+        run: bash system-test/scripts/stest-up.sh
 
       - name: Run system tests
         working-directory: system-test
@@ -86,10 +81,30 @@ jobs:
           ./gradlew clean --no-daemon
           ./gradlew --info stest --no-daemon
 
-      - name: Upload FullNode log
+      - name: Capture node log + journal
+        if: always()
+        run: |
+          mkdir -p logs
+          # trond writes the FullNode stdout/stderr through systemd's
+          # journal; dump the full journal for the unit so post-mortem
+          # works without ssh access to the runner.
+          sudo journalctl -u tron-stest-singlenode --no-pager -o short-iso > logs/journal.log 2>&1 || true
+          # If a node.log exists in the install path (some trond
+          # invocations write directly), capture that too.
+          sudo cp /opt/tron/stest-singlenode/node.log logs/node.log 2>/dev/null || true
+          sudo chown -R "$USER:$USER" logs/
+          ls -lah logs/
+
+      - name: Tear down stest deployment
+        if: always()
+        env:
+          STEST_KEEP_DATA: ""
+        run: bash system-test/scripts/stest-down.sh
+
+      - name: Upload trond + node logs
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: fullnode-log
-          path: java-tron/fullnode.log
+          name: stest-node-logs
+          path: logs/
           if-no-files-found: warn
