@@ -61,14 +61,47 @@ jobs:
         working-directory: java-tron
         run: ./gradlew clean build -x test --no-daemon
 
-      # Phase A note: trond release URL points at the warku123 fork
-      # while the system-test integration is in review. The Phase B
-      # switchover commit will repoint to
-      # tronprotocol/tron-deployment after upstream merge + release.
-      - name: Bring up the stest single-SR via trond
+      # Phase A note: trond release URL inside stest-up.sh defaults to
+      # the warku123 fork; will be repointed to tronprotocol after
+      # upstream merge + release.
+      #
+      # Two-layer fallback for resilience to cross-repo merge-order
+      # skew:
+      #   - workflow layer (this step): if scripts/stest-up.sh is
+      #     absent (system-test PR not merged yet but java-tron PR
+      #     was), fall back to the legacy inline nohup path.
+      #   - script layer (inside stest-up.sh): if trond release URL
+      #     is unreachable / sha256 mismatch, fall back to nohup
+      #     java -jar with the bundled config.
+      #
+      # Either path lands at the same state (HTTP 8090 reachable +
+      # node minting blocks), so the stest gradle step works.
+      - name: Bring up the stest single-SR
         env:
           STEST_JAR: ${{ github.workspace }}/java-tron/build/libs/FullNode.jar
-        run: bash system-test/scripts/stest-up.sh
+        run: |
+          if [ -x system-test/scripts/stest-up.sh ]; then
+            echo "[bring-up] using system-test/scripts/stest-up.sh"
+            bash system-test/scripts/stest-up.sh
+          else
+            echo "[bring-up] stest-up.sh not found in system-test checkout"
+            echo "[bring-up] falling back to inline nohup java -jar"
+            cp system-test/testcase/src/test/resources/config-system-test.conf java-tron/
+            cd java-tron
+            nohup java -jar build/libs/FullNode.jar --witness \
+              -c config-system-test.conf > fullnode.log 2>&1 &
+            for i in $(seq 1 60); do
+              if curl -s --fail "http://localhost:8090/wallet/getblockbynum?num=1" \
+                  > /dev/null 2>&1; then
+                echo "[bring-up] FullNode ready after $((i*5))s (legacy path)"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "[bring-up] FullNode failed to start within 5 minutes (legacy path)"
+            tail -50 fullnode.log
+            exit 1
+          fi
 
       - name: Run system tests
         working-directory: system-test
@@ -81,17 +114,18 @@ jobs:
           ./gradlew clean --no-daemon
           ./gradlew --info stest --no-daemon
 
-      - name: Capture node log + journal
+      - name: Capture node logs
         if: always()
         run: |
           mkdir -p logs
-          # trond writes the FullNode stdout/stderr through systemd's
-          # journal; dump the full journal for the unit so post-mortem
-          # works without ssh access to the runner.
-          sudo journalctl -u tron-stest-singlenode --no-pager -o short-iso > logs/journal.log 2>&1 || true
-          # If a node.log exists in the install path (some trond
-          # invocations write directly), capture that too.
+          # trond mode: systemd journal for the unit
+          sudo journalctl -u tron-stest-singlenode --no-pager -o short-iso \
+            > logs/journal.log 2>&1 || true
+          # trond mode: trond fallback writes node.log directly to install_path
+          # fallback mode: stest-up.sh writes node.log to install_path
           sudo cp /opt/tron/stest-singlenode/node.log logs/node.log 2>/dev/null || true
+          # legacy inline path: java-tron/fullnode.log
+          cp java-tron/fullnode.log logs/fullnode.log 2>/dev/null || true
           sudo chown -R "$USER:$USER" logs/
           ls -lah logs/
 
@@ -99,7 +133,15 @@ jobs:
         if: always()
         env:
           STEST_KEEP_DATA: ""
-        run: bash system-test/scripts/stest-down.sh
+        run: |
+          # Mirror the workflow-layer fallback in the bring-up step:
+          # only call stest-down.sh if it exists. Legacy-path nodes
+          # die with the runner VM so no explicit teardown is needed.
+          if [ -x system-test/scripts/stest-down.sh ]; then
+            bash system-test/scripts/stest-down.sh
+          else
+            echo "[teardown] stest-down.sh not found; skipping (legacy path)"
+          fi
 
       - name: Upload trond + node logs
         if: always()
