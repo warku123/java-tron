@@ -77,6 +77,7 @@ jobs:
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:${{ github.workspace }}" \
+            -v "${{ github.workspace }}/docker/multi-node:/app/docker/multi-node" \
             -e HOST_WORKDIR="${{ github.workspace }}" \
             -e TRON_IMAGE=java-tron-local:pr \
             -e JAVA_HOME=/usr/lib/jvm/temurin-8 \
