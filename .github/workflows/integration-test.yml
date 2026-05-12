@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
-    name: Integration Smoke (JDK 8 / x86_64)
+  integration:
+    name: Integration Test (JDK 8 / x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout java-tron
@@ -44,35 +44,35 @@ jobs:
       - name: Pull integration-test image
         run: docker pull warku123/java-tron-integration-test:latest
 
-      - name: Run smoke tests
+      - name: Run integration tests
         run: |
           # JAVA_HOME=JDK 8 so FullNode runs on the same JVM family as
-          # production (a few smoke assertions check `java.version` starts
-          # with "1.8"). JAVA_HOME_17 keeps Gradle on JDK 17 for the test
+          # production (a few assertions check `java.version` starts with
+          # "1.8"). JAVA_HOME_17 keeps Gradle on JDK 17 for the test
           # tooling, which requires Java 17.
-          docker run --name integration-smoke \
+          docker run --name integration-test \
             -e FULLNODE_JAR=/javatron/FullNode.jar \
             -e JAVA_HOME=/usr/lib/jvm/temurin-8 \
             -e JAVA_HOME_17=/opt/java/openjdk \
             -v "${{ github.workspace }}/build/libs/FullNode.jar:/javatron/FullNode.jar:ro" \
             warku123/java-tron-integration-test:latest \
-            --smoke --clean
+            --clean
 
       - name: Extract test reports from container
         if: always()
         run: |
           mkdir -p integration-reports
-          docker cp integration-smoke:/app/build/reports/. integration-reports/reports/ 2>/dev/null || true
-          docker cp integration-smoke:/app/build/test-results/. integration-reports/test-results/ 2>/dev/null || true
-          docker cp integration-smoke:/app/build/test-output.log integration-reports/ 2>/dev/null || true
-          docker cp integration-smoke:/app/node/node.log integration-reports/ 2>/dev/null || true
-          docker cp integration-smoke:/app/node/data/logs/tron.log integration-reports/ 2>/dev/null || true
-          docker rm -f integration-smoke 2>/dev/null || true
+          docker cp integration-test:/app/build/reports/. integration-reports/reports/ 2>/dev/null || true
+          docker cp integration-test:/app/build/test-results/. integration-reports/test-results/ 2>/dev/null || true
+          docker cp integration-test:/app/build/test-output.log integration-reports/ 2>/dev/null || true
+          docker cp integration-test:/app/node/node.log integration-reports/ 2>/dev/null || true
+          docker cp integration-test:/app/node/data/logs/tron.log integration-reports/ 2>/dev/null || true
+          docker rm -f integration-test 2>/dev/null || true
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: integration-smoke-report
+          name: integration-test-report
           path: integration-reports/
           if-no-files-found: warn
