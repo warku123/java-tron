@@ -11,9 +11,10 @@ import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.generateFilterId;
 import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.getEnergyUsageTotal;
 import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.getTransactionIndex;
 import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.getTxID;
+import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.parseBlockNumber;
 import static org.tron.core.services.jsonrpc.JsonRpcApiUtil.triggerCallContract;
 
-import com.alibaba.fastjson.JSON;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.protobuf.ByteString;
@@ -30,6 +31,7 @@ import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import lombok.Getter;
@@ -88,6 +90,7 @@ import org.tron.core.services.jsonrpc.types.TransactionReceipt.TransactionContex
 import org.tron.core.services.jsonrpc.types.TransactionResult;
 import org.tron.core.store.StorageRowStore;
 import org.tron.core.vm.program.Storage;
+import org.tron.json.JSON;
 import org.tron.program.Version;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.Block;
@@ -117,7 +120,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
 
   private static final String FILTER_NOT_FOUND = "filter not found";
   public static final int EXPIRE_SECONDS = 5 * 60;
-  private static final int maxBlockFilterNum = Args.getInstance().getJsonRpcMaxBlockFilterNum();
+  private final int maxBlockFilterNum = Args.getInstance().getJsonRpcMaxBlockFilterNum();
+  private final int maxLogFilterNum = Args.getInstance().getJsonRpcMaxLogFilterNum();
   private static final Cache<LogFilterElement, LogFilterElement> logElementCache =
       CacheBuilder.newBuilder()
           .maximumSize(300_000L) // 300s * tps(1000) * 1 log/tx ≈ 300_000
@@ -132,25 +136,25 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
    * for log filter in Full Json-RPC
    */
   @Getter
-  private static final Map<String, LogFilterAndResult> eventFilter2ResultFull =
+  private final Map<String, LogFilterAndResult> eventFilter2ResultFull =
       new ConcurrentHashMap<>();
   /**
    * for block in Full Json-RPC
    */
   @Getter
-  private static final Map<String, BlockFilterAndResult> blockFilter2ResultFull =
+  private final Map<String, BlockFilterAndResult> blockFilter2ResultFull =
       new ConcurrentHashMap<>();
   /**
    * for log filter in solidity Json-RPC
    */
   @Getter
-  private static final Map<String, LogFilterAndResult> eventFilter2ResultSolidity =
+  private final Map<String, LogFilterAndResult> eventFilter2ResultSolidity =
       new ConcurrentHashMap<>();
   /**
    * for block in solidity Json-RPC
    */
   @Getter
-  private static final Map<String, BlockFilterAndResult> blockFilter2ResultSolidity =
+  private final Map<String, BlockFilterAndResult> blockFilter2ResultSolidity =
       new ConcurrentHashMap<>();
 
   public static final String HASH_REGEX = "(0x)?[a-zA-Z0-9]{64}$";
@@ -166,25 +170,44 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   private static final String NO_BLOCK_HEADER_BY_HASH = "header for hash not found";
 
   private static final String ERROR_SELECTOR = "08c379a0"; // Function selector for Error(string)
+  private static final int REVERT_REASON_SELECTOR_LENGTH = 4;
+  private static final int MAX_REVERT_REASON_PAYLOAD_BYTES = 4096;
+  private int filterParallelThreshold = 10000;
+  /**
+   * Using the default maxLogFilterNum of 20,000, a 3-thread pool can keep up with log event
+   * processing for each block within the 3-second BLOCK_PRODUCED_INTERVAL. Increasing the thread
+   * pool size too much may affect the performance of the main block processing thread.
+   */
+  private final ForkJoinPool logsFilterPool =
+      ExecutorServiceManager.newForkJoinPool("logs-filter-pool", 3);
   /**
    * thread pool of query section bloom store
    */
   private final ExecutorService sectionExecutor;
   private final NodeInfoService nodeInfoService;
   private final Wallet wallet;
-  private final Manager manager;
+  @Autowired
+  private Manager manager;
   private final String esName = "query-section";
 
   @Autowired
-  public TronJsonRpcImpl(@Autowired NodeInfoService nodeInfoService, @Autowired Wallet wallet,
-                         @Autowired Manager manager) {
+  public TronJsonRpcImpl(@Autowired NodeInfoService nodeInfoService, @Autowired Wallet wallet) {
     this.nodeInfoService = nodeInfoService;
     this.wallet = wallet;
-    this.manager = manager;
     this.sectionExecutor = ExecutorServiceManager.newFixedThreadPool(esName, 5);
   }
 
-  public static void handleBLockFilter(BlockFilterCapsule blockFilterCapsule) {
+  @VisibleForTesting
+  public void setManager(Manager manager) {
+    this.manager = manager;
+  }
+
+  @VisibleForTesting
+  public void setFilterParallelThreshold(int filterParallelThreshold) {
+    this.filterParallelThreshold = filterParallelThreshold;
+  }
+
+  public void handleBLockFilter(BlockFilterCapsule blockFilterCapsule) {
     Iterator<Entry<String, BlockFilterAndResult>> it;
 
     if (blockFilterCapsule.isSolidified()) {
@@ -218,54 +241,69 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   /**
    * append LogsFilterCapsule's LogFilterElement list to each filter if matched
    */
-  public static void handleLogsFilter(LogsFilterCapsule logsFilterCapsule) {
-    Iterator<Entry<String, LogFilterAndResult>> it;
+  public void handleLogsFilter(LogsFilterCapsule logsFilterCapsule) {
+    long t1 = System.currentTimeMillis();
+    Map<String, LogFilterAndResult> eventFilterMap;
 
     if (logsFilterCapsule.isSolidified()) {
-      it = getEventFilter2ResultSolidity().entrySet().iterator();
+      eventFilterMap = getEventFilter2ResultSolidity();
     } else {
-      it = getEventFilter2ResultFull().entrySet().iterator();
+      eventFilterMap = getEventFilter2ResultFull();
     }
 
-    while (it.hasNext()) {
-      Entry<String, LogFilterAndResult> entry = it.next();
-      if (entry.getValue().isExpire()) {
-        it.remove();
-        continue;
-      }
-
-      LogFilterAndResult logFilterAndResult = entry.getValue();
-      long fromBlock = logFilterAndResult.getLogFilterWrapper().getFromBlock();
-      long toBlock = logFilterAndResult.getLogFilterWrapper().getToBlock();
-      if (!(fromBlock <= logsFilterCapsule.getBlockNumber()
-          && logsFilterCapsule.getBlockNumber() <= toBlock)) {
-        continue;
-      }
-
-      if (logsFilterCapsule.getBloom() != null
-          && !logFilterAndResult.getLogFilterWrapper().getLogFilter()
-          .matchBloom(logsFilterCapsule.getBloom())) {
-        continue;
-      }
-
-      LogFilter logFilter = logFilterAndResult.getLogFilterWrapper().getLogFilter();
-      List<LogFilterElement> elements =
-          LogMatch.matchBlock(logFilter, logsFilterCapsule.getBlockNumber(),
-              logsFilterCapsule.getBlockHash(), logsFilterCapsule.getTxInfoList(),
-              logsFilterCapsule.isRemoved());
-
-      for (LogFilterElement element : elements) {
-        LogFilterElement cachedElement;
-        try {
-          // compare with hashcode() first, then with equals(). If not exist, put it.
-          cachedElement = logElementCache.get(element, () -> element);
-        } catch (ExecutionException e) {
-          logger.error("Getting/loading LogFilterElement from cache fails", e); // never happen
-          cachedElement = element;
-        }
-        logFilterAndResult.getResult().add(cachedElement);
-      }
+    if (eventFilterMap.size() <= filterParallelThreshold) {
+      eventFilterMap.entrySet().forEach(
+          entry -> processLogFilterEntry(entry, eventFilterMap, logsFilterCapsule));
+    } else {
+      logsFilterPool.submit(() -> eventFilterMap.entrySet().parallelStream()
+          .forEach(entry -> processLogFilterEntry(entry, eventFilterMap, logsFilterCapsule))
+      ).join();
     }
+    long t2 = System.currentTimeMillis();
+    logger.debug("handleLogsFilter {} cost {}, filter size {}",
+        logsFilterCapsule.isSolidified() ? "Solidity" : "Full", t2 - t1, eventFilterMap.size());
+  }
+
+  private void processLogFilterEntry(
+      Map.Entry<String, LogFilterAndResult> entry,
+      Map<String, LogFilterAndResult> eventFilterMap,
+      LogsFilterCapsule logsFilterCapsule) {
+    LogFilterAndResult logFilterAndResult = entry.getValue();
+    if (logFilterAndResult.isExpire()) {
+      eventFilterMap.remove(entry.getKey());
+      return;
+    }
+
+    long blockNumber = logsFilterCapsule.getBlockNumber();
+    long fromBlock = logFilterAndResult.getLogFilterWrapper().getFromBlock();
+    long toBlock = logFilterAndResult.getLogFilterWrapper().getToBlock();
+    if (!(fromBlock <= blockNumber && blockNumber <= toBlock)) {
+      return;
+    }
+
+    if (logsFilterCapsule.getBloom() != null && !logFilterAndResult.getLogFilterWrapper()
+        .getLogFilter().matchBloom(logsFilterCapsule.getBloom())) {
+      return;
+    }
+
+    LogFilter logFilter = logFilterAndResult.getLogFilterWrapper().getLogFilter();
+    List<LogFilterElement> elements =
+        LogMatch.matchBlock(logFilter, blockNumber, logsFilterCapsule.getBlockHash(),
+            logsFilterCapsule.getTxInfoList(), logsFilterCapsule.isRemoved());
+
+    List<LogFilterElement> localResults = new ArrayList<>(elements.size());
+    for (LogFilterElement element : elements) {
+      LogFilterElement cachedElement;
+      try {
+        // compare with hashcode() first, then with equals(). If not exist, put it.
+        cachedElement = logElementCache.get(element, () -> element);
+      } catch (ExecutionException e) {
+        logger.error("Getting/loading LogFilterElement from cache fails", e); // never happen
+        cachedElement = element;
+      }
+      localResults.add(cachedElement);
+    }
+    logFilterAndResult.getResult().addAll(localResults);
   }
 
   @Override
@@ -354,11 +392,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     if (JsonRpcApiUtil.isBlockTag(blockNumOrTag)) {
       throw new JsonRpcInvalidParamsException(TAG_NOT_SUPPORT_ERROR);
     }
-    try {
-      ByteArray.hexToBigInteger(blockNumOrTag);
-    } catch (Exception e) {
-      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
-    }
+    parseBlockNumber(blockNumOrTag);
     throw new JsonRpcInvalidParamsException(QUANTITY_NOT_SUPPORT_ERROR);
   }
 
@@ -368,7 +402,6 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   }
 
   private Block getBlockByNumOrTag(String blockNumOrTag) throws JsonRpcInvalidParamsException {
-    long blockNum;
     if (JsonRpcApiUtil.isBlockTag(blockNumOrTag)) {
       if (LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
         // Return the head block directly from blockStore, bypassing blockIndexStore
@@ -377,12 +410,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       }
       return wallet.getBlockByNum(JsonRpcApiUtil.parseBlockTag(blockNumOrTag, wallet));
     }
-    try {
-      blockNum = ByteArray.hexToBigInteger(blockNumOrTag).longValueExact();
-    } catch (Exception e) {
-      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
-    }
-    return wallet.getBlockByNum(blockNum);
+    return wallet.getBlockByNum(parseBlockNumber(blockNumOrTag));
   }
 
   private BlockResult getBlockResult(Block block, boolean fullTx) {
@@ -493,6 +521,36 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   }
 
   /**
+   * Decodes an Error(string) revert reason when possible.
+   * Returns ": reason" for a non-empty reason, otherwise "".
+   */
+  static String tryDecodeRevertReason(byte[] resData) {
+    if (resData == null || resData.length <= REVERT_REASON_SELECTOR_LENGTH) {
+      return "";
+    }
+    if (!Hex.toHexString(resData, 0, REVERT_REASON_SELECTOR_LENGTH).equals(ERROR_SELECTOR)) {
+      return "";
+    }
+
+    int revertPayloadLength = resData.length - REVERT_REASON_SELECTOR_LENGTH;
+    if (revertPayloadLength > MAX_REVERT_REASON_PAYLOAD_BYTES) {
+      logger.debug("skip parsing oversized revert reason payload: {} bytes", revertPayloadLength);
+      return "";
+    }
+
+    try {
+      String reason = ContractEventParser.parseDataBytes(
+          Arrays.copyOfRange(resData, REVERT_REASON_SELECTOR_LENGTH,
+              resData.length),
+          "string", 0);
+      return reason.isEmpty() ? "" : ": " + reason;
+    } catch (RuntimeException e) {
+      logger.debug("parse revert reason failed", e);
+      return "";
+    }
+  }
+
+  /**
    * @param data Hash of the method signature and encoded parameters. for example:
    * getMethodSign(methodName(uint256,uint256)) || data1 || data2
    */
@@ -535,14 +593,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       }
       result = ByteArray.toJsonHex(listBytes);
     } else {
-      String errMsg = retBuilder.getMessage().toStringUtf8();
       byte[] resData = trxExtBuilder.getConstantResult(0).toByteArray();
-      if (resData.length > 4 && Hex.toHexString(resData).startsWith(ERROR_SELECTOR)) {
-        String msg = ContractEventParser
-            .parseDataBytes(org.bouncycastle.util.Arrays.copyOfRange(resData, 4, resData.length),
-                "string", 0);
-        errMsg += ": " + msg;
-      }
+      String errMsg = retBuilder.getMessage().toStringUtf8() + tryDecodeRevertReason(resData);
 
       if (resData.length > 0) {
         throw new JsonRpcInternalException(errMsg, ByteArray.toJsonHex(resData));
@@ -645,7 +697,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
         estimateEnergy(ownerAddress,
             contractAddress,
             args.parseValue(),
-            ByteArray.fromHexString(args.getData()),
+            ByteArray.fromHexString(args.resolveData()),
             trxExtBuilder,
             retBuilder,
             estimateBuilder);
@@ -653,7 +705,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
         callTriggerConstantContract(ownerAddress,
             contractAddress,
             args.parseValue(),
-            ByteArray.fromHexString(args.getData()),
+            ByteArray.fromHexString(args.resolveData()),
             trxExtBuilder,
             retBuilder);
       }
@@ -675,15 +727,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     }
 
     if (trxExtBuilder.getTransaction().getRet(0).getRet().equals(code.FAILED)) {
-      String errMsg = retBuilder.getMessage().toStringUtf8();
-
       byte[] data = trxExtBuilder.getConstantResult(0).toByteArray();
-      if (data.length > 4 && Hex.toHexString(data).startsWith(ERROR_SELECTOR)) {
-        String msg = ContractEventParser
-            .parseDataBytes(org.bouncycastle.util.Arrays.copyOfRange(data, 4, data.length),
-                "string", 0);
-        errMsg += ": " + msg;
-      }
+      String errMsg = retBuilder.getMessage().toStringUtf8() + tryDecodeRevertReason(data);
 
       if (data.length > 0) {
         throw new JsonRpcInternalException(errMsg, ByteArray.toJsonHex(data));
@@ -969,12 +1014,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
           throw new JsonRpcInvalidParamsException(JSON_ERROR);
         }
 
-        long blockNumber;
-        try {
-          blockNumber = ByteArray.hexToBigInteger(blockNumOrTag).longValueExact();
-        } catch (Exception e) {
-          throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
-        }
+        long blockNumber = parseBlockNumber(blockNumOrTag);
 
         if (wallet.getBlockByNum(blockNumber) == null) {
           throw new JsonRpcInternalException(NO_BLOCK_HEADER);
@@ -1007,7 +1047,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     byte[] contractAddressData = addressCompatibleToByteArray(transactionCall.getTo());
 
     return call(addressData, contractAddressData, transactionCall.parseValue(),
-        ByteArray.fromHexString(transactionCall.getData()));
+        ByteArray.fromHexString(transactionCall.resolveData()));
   }
 
   @Override
@@ -1114,7 +1154,8 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       smartBuilder.setOriginAddress(ByteString.copyFrom(ownerAddress));
 
       // bytecode + parameter
-      smartBuilder.setBytecode(ByteString.copyFrom(ByteArray.fromHexString(args.getData())));
+      smartBuilder.setBytecode(
+          ByteString.copyFrom(ByteArray.fromHexString(args.resolveData())));
 
       if (StringUtils.isNotEmpty(args.getName())) {
         smartBuilder.setName(args.getName());
@@ -1159,8 +1200,9 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       build.setOwnerAddress(ByteString.copyFrom(ownerAddress))
           .setContractAddress(ByteString.copyFrom(contractAddress));
 
-      if (StringUtils.isNotEmpty(args.getData())) {
-        build.setData(ByteString.copyFrom(ByteArray.fromHexString(args.getData())));
+      String callData = args.resolveData();
+      if (StringUtils.isNotEmpty(callData)) {
+        build.setData(ByteString.copyFrom(ByteArray.fromHexString(callData)));
       } else {
         build.setData(ByteString.copyFrom(new byte[0]));
       }
@@ -1392,7 +1434,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
 
   @Override
   public String newFilter(FilterRequest fr) throws JsonRpcInvalidParamsException,
-      JsonRpcMethodNotFoundException {
+      JsonRpcMethodNotFoundException, JsonRpcExceedLimitException {
     disableInPBFT("eth_newFilter");
 
     // not supports finalized as block parameter
@@ -1407,7 +1449,11 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     } else {
       eventFilter2Result = eventFilter2ResultSolidity;
     }
-
+    // Due to concurrent access, the threshold may occasionally be exceeded.
+    if (maxLogFilterNum > 0 && eventFilter2Result.size() >= maxLogFilterNum) {
+      throw new JsonRpcExceedLimitException(
+          "exceed max log filters: " + maxLogFilterNum + ", try again later");
+    }
     long currentMaxFullNum = wallet.getNowBlock().getBlockHeader().getRawData().getNumber();
     LogFilterAndResult logFilterAndResult = new LogFilterAndResult(fr, currentMaxFullNum, wallet);
     String filterID = generateFilterId();
@@ -1426,7 +1472,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     } else {
       blockFilter2Result = blockFilter2ResultSolidity;
     }
-    if (blockFilter2Result.size() >= maxBlockFilterNum) {
+    if (maxBlockFilterNum > 0 && blockFilter2Result.size() >= maxBlockFilterNum) {
       throw new JsonRpcExceedLimitException(
           "exceed max block filters: " + maxBlockFilterNum + ", try again later");
     }
@@ -1535,7 +1581,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     return logMatch.matchBlockOneByOne();
   }
 
-  public static Object[] getFilterResult(String filterId, Map<String, BlockFilterAndResult>
+  public Object[] getFilterResult(String filterId, Map<String, BlockFilterAndResult>
       blockFilter2Result, Map<String, LogFilterAndResult> eventFilter2Result)
       throws ItemNotFoundException {
     Object[] result;
@@ -1559,6 +1605,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
 
   @Override
   public void close() throws IOException {
+    ExecutorServiceManager.shutdownAndAwaitTermination(logsFilterPool, "logs-filter-pool");
     logElementCache.invalidateAll();
     blockHashCache.invalidateAll();
     ExecutorServiceManager.shutdownAndAwaitTermination(sectionExecutor, esName);

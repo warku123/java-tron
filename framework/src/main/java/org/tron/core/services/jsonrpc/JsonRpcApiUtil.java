@@ -4,6 +4,7 @@ import com.google.common.base.Throwables;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
+import java.math.BigInteger;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,6 +60,8 @@ public class JsonRpcApiUtil {
   public static final String TAG_PENDING_SUPPORT_ERROR = "TAG pending not supported";
   public static final String TAG_SAFE_SUPPORT_ERROR = "TAG safe not supported";
   public static final String BLOCK_NUM_ERROR = "invalid block number";
+
+  private static final SecureRandom random = new SecureRandom();
 
   public static byte[] convertToTronAddress(byte[] address) {
     byte[] newAddress = new byte[21];
@@ -442,6 +445,50 @@ public class JsonRpcApiUtil {
     return StringUtils.isEmpty(quantity) || quantity.equals("0x0");
   }
 
+  /**
+   * Validation mode for {@link #requireValidHex}.
+   */
+  public enum HexMode {
+    /**
+     * Execution-apis BYTES schema: requires {@code 0x} prefix and
+     * even total length; {@code ""} is accepted as empty bytes per
+     * geth's {@code hexutil.Bytes.UnmarshalText}.
+     */
+    STRICT,
+    /**
+     * {@link ByteArray#fromHexString}'s lenient parsing: accepts bare
+     * hex and odd-length input. Kept for backward compatibility.
+     */
+    LENIENT
+  }
+
+  /**
+   * Throws if {@code value} is not parseable hex under the given
+   * {@code mode}. {@code null} is treated as absent and returns
+   * silently. {@code fieldName} is used only in error messages.
+   */
+  public static void requireValidHex(String fieldName, String value, HexMode mode)
+      throws JsonRpcInvalidParamsException {
+    if (value == null) {
+      return;
+    }
+    if (mode == HexMode.STRICT) {
+      if (value.isEmpty()) {
+        return;
+      }
+      if (!value.startsWith("0x") || value.length() % 2 != 0) {
+        throw new JsonRpcInvalidParamsException(
+            "invalid hex string for \"" + fieldName + "\"");
+      }
+    }
+    try {
+      ByteArray.fromHexString(value);
+    } catch (Exception e) {
+      throw new JsonRpcInvalidParamsException(
+          "invalid hex string for \"" + fieldName + "\"");
+    }
+  }
+
   public static long parseQuantityValue(String value) throws JsonRpcInvalidParamsException {
     long callValue = 0L;
 
@@ -554,6 +601,41 @@ public class JsonRpcApiUtil {
   }
 
   /**
+   * Max allowed length for a JSON-RPC block number hex/decimal input.
+   * API-level DoS guard: rejects pathological inputs before BigInteger parsing,
+   * whose cost grows quadratically with length. Covers hex (0x + 64 chars for
+   * uint256) and decimal (78 chars for uint256) representations with headroom.
+   */
+  private static final int MAX_BLOCK_NUM_HEX_LEN = 100;
+
+  /**
+   * Parse a JSON-RPC block number (hex "0x..." or decimal) into a long,
+   * enforcing the {@link #MAX_BLOCK_NUM_HEX_LEN} length limit, rejecting
+   * negative values, and rejecting values that overflow a signed 64-bit
+   * block number.
+   */
+  public static long parseBlockNumber(String blockNum)
+      throws JsonRpcInvalidParamsException {
+    if (blockNum == null || blockNum.length() > MAX_BLOCK_NUM_HEX_LEN) {
+      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
+    }
+    BigInteger value;
+    try {
+      value = ByteArray.hexToBigInteger(blockNum);
+    } catch (Exception e) {
+      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
+    }
+    if (value.signum() < 0) {
+      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
+    }
+    try {
+      return value.longValueExact();
+    } catch (ArithmeticException e) {
+      throw new JsonRpcInvalidParamsException(BLOCK_NUM_ERROR);
+    }
+  }
+
+  /**
    * Parse a block tag or hex number. Uses strict jsonHexToLong (requires 0x prefix) for hex.
    * Callers needing flexible hex parsing (0x -> hex, bare number -> decimal) should use
    * isBlockTag/parseBlockTag and handle hex separately with hexToBigInteger.
@@ -567,7 +649,6 @@ public class JsonRpcApiUtil {
   }
 
   public static String generateFilterId() {
-    SecureRandom random = new SecureRandom();
     byte[] uid = new byte[16]; // 128 bits are converted to 16 bytes
     random.nextBytes(uid);
     return ByteArray.toHexString(uid);
