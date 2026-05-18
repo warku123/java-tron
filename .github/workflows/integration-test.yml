@@ -41,8 +41,18 @@ jobs:
       - name: Build FullNode.jar
         run: ./gradlew clean build -x test --no-daemon
 
+      - name: Login to DockerHub
+        # troninfra/troninfra-ci is a private repo; pull needs DockerHub auth.
+        # Configure secrets at Settings -> Secrets and variables -> Actions:
+        #   DOCKERHUB_USER  = troninfra
+        #   DOCKERHUB_PASS  = <DockerHub access token, Read & Write scope>
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
       - name: Pull integration-test image
-        run: docker pull warku123/java-tron-integration-test:latest
+        run: docker pull troninfra/troninfra-ci:latest
 
       - name: Run integration tests
         run: |
@@ -55,7 +65,7 @@ jobs:
             -e JAVA_HOME=/usr/lib/jvm/temurin-8 \
             -e JAVA_HOME_17=/opt/java/openjdk \
             -v "${{ github.workspace }}/build/libs/FullNode.jar:/javatron/FullNode.jar:ro" \
-            warku123/java-tron-integration-test:latest \
+            troninfra/troninfra-ci:latest \
             --clean
 
       - name: Extract test reports from container
