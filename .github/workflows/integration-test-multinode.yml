@@ -51,8 +51,18 @@ jobs:
           EOF
           docker build -t java-tron-local:pr /tmp/tron-image
 
+      - name: Login to DockerHub
+        # troninfra/troninfra-ci is a private repo; pull needs DockerHub auth.
+        # Configure secrets at Settings -> Secrets and variables -> Actions:
+        #   DOCKERHUB_USER  = troninfra
+        #   DOCKERHUB_PASS  = <DockerHub access token, Read & Write scope>
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
       - name: Pull integration-test image
-        run: docker pull warku123/java-tron-integration-test:latest
+        run: docker pull troninfra/troninfra-ci:latest
 
       - name: Extract compose configs to host (for DinD path-alignment)
         run: |
@@ -63,7 +73,7 @@ jobs:
           # /app/docker/ 1:1 into workspace/docker/ — the subdirectories
           # (multi-node/, single-node/) don't collide with java-tron's own
           # docker/ files.
-          docker create --name it-extract warku123/java-tron-integration-test:latest
+          docker create --name it-extract troninfra/troninfra-ci:latest
           docker cp it-extract:/app/docker/. "${{ github.workspace }}/docker/"
           docker rm -f it-extract
 
@@ -82,7 +92,7 @@ jobs:
             -e TRON_IMAGE=java-tron-local:pr \
             -e JAVA_HOME=/usr/lib/jvm/temurin-8 \
             -e JAVA_HOME_17=/opt/java/openjdk \
-            warku123/java-tron-integration-test:latest \
+            troninfra/troninfra-ci:latest \
             --multinode --clean
 
       - name: Extract test reports from container
