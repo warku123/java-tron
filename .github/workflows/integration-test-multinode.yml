@@ -1,4 +1,4 @@
-name: Integration Test (Multinode)
+name: Integration Test Multinode (Full)
 
 on:
   pull_request:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   multinode-full:
-    name: Integration Test Multinode (JDK 8 / x86_64)
+    name: Integration Test Multinode Full (JDK 8 / x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
