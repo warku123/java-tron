@@ -1,4 +1,4 @@
-name: Integration Test
+name: Integration Test Single Node (Full)
 
 on:
   pull_request:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   integration:
-    name: Integration Test (JDK 8 / x86_64)
+    name: Integration Test Single Node Full (JDK 8 / x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
