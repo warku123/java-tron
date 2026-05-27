@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+  "-//Puppy Crawl//DTD Check Configuration 1.3//EN"
+  "https://checkstyle.sourceforge.net/dtds/configuration_1_3.dtd">
+
+<!--
+    Strict Checkstyle config for diff-only enforcement (proposal: add-diff-only-style-check).
+
+    This config contains rules selected from openspec/code-style-rules-catalog.md § 2
+    where the Tool column is marked Checkstyle-catchable (✓ or ⚠).
+
+    Intended usage: full-repo scan with ignoreFailures=true; reviewdog in CI filters
+    violations to PR diff lines only. NEVER make this a hard gate without diff filtering.
+-->
+
+<module name="Checker">
+  <property name="charset" value="UTF-8"/>
+  <property name="severity" value="warning"/>
+  <property name="fileExtensions" value="java"/>
+
+  <!-- C5: TODO/FIXME/XXX/HACK without owner -->
+  <module name="RegexpSingleline">
+    <property name="id" value="C5_TodoWithoutOwner"/>
+    <property name="format" value="(TODO|FIXME|XXX|HACK)(?!\s*\([\w.@-]+\))"/>
+    <property name="message" value="C5: TODO/FIXME/XXX/HACK must include an owner, e.g. // TODO(alice): ..."/>
+  </module>
+
+  <!-- B4: trailing whitespace -->
+  <module name="RegexpSingleline">
+    <property name="id" value="B4_TrailingWhitespace"/>
+    <property name="format" value="\s+$"/>
+    <property name="message" value="B4: line has trailing whitespace"/>
+  </module>
+
+  <!-- B3: newline at end of file -->
+  <module name="NewlineAtEndOfFile">
+    <property name="id" value="B3_NewlineAtEnd"/>
+    <property name="lineSeparator" value="lf"/>
+  </module>
+
+  <!-- B2: common misspellings (in identifiers, comments, strings).
+       Conservative curated list; case-insensitive. Add more over time. -->
+  <module name="RegexpSingleline">
+    <property name="id" value="B2_Misspelling"/>
+    <property name="format" value="(?i)\b(recieve|seperat|occured|existant|existance|accross|adress|begining|calender|comming|enviroment|finaly|foward|happend|hierachy|independant|intialize|lenght|maintainance|mantainance|managment|neccesar|noticable|ocurr|prefered|priviledge|proccess|recomend|reccommend|retreive|succesful|sucessful|threshhold|tranfer|untill|usefull|wether|writeable|sytem|sucess|wich|recieve)\w*\b"/>
+    <property name="message" value="B2: likely misspelling — check the word against a dictionary"/>
+  </module>
+
+  <module name="TreeWalker">
+    <!-- Allow //CHECKSTYLE:OFF / //CHECKSTYLE:ON local suppression -->
+    <module name="SuppressionCommentFilter"/>
+
+    <!-- B1: naming conventions (Java standard).
+         Defaults are Checkstyle's built-in regexes; legacy hits are filtered by reviewdog. -->
+    <module name="TypeName">
+      <property name="id" value="B1_TypeName"/>
+    </module>
+    <module name="MethodName">
+      <property name="id" value="B1_MethodName"/>
+    </module>
+    <module name="ConstantName">
+      <property name="id" value="B1_ConstantName"/>
+    </module>
+    <module name="LocalVariableName">
+      <property name="id" value="B1_LocalVariableName"/>
+    </module>
+    <module name="MemberName">
+      <property name="id" value="B1_MemberName"/>
+    </module>
+    <module name="ParameterName">
+      <property name="id" value="B1_ParameterName"/>
+    </module>
+    <module name="StaticVariableName">
+      <property name="id" value="B1_StaticVariableName"/>
+    </module>
+    <module name="PackageName">
+      <property name="id" value="B1_PackageName"/>
+    </module>
+
+    <!-- A1 + A2: catch (Exception) / catch (Throwable) — narrow the type -->
+    <module name="IllegalCatch">
+      <property name="id" value="A1A2_IllegalCatch"/>
+      <property name="illegalClassNames" value="java.lang.Exception, java.lang.Throwable, java.lang.RuntimeException, Exception, Throwable, RuntimeException"/>
+    </module>
+
+    <!-- D2: redundant imports (same package, java.lang, duplicates) -->
+    <module name="RedundantImport">
+      <property name="id" value="D2_RedundantImport"/>
+    </module>
+
+    <!-- D3: unused imports (leftover after refactoring) -->
+    <module name="UnusedImports">
+      <property name="id" value="D3_UnusedImports"/>
+      <property name="processJavadoc" value="true"/>
+    </module>
+
+    <!-- F2: System.out.println / System.err.println in production code -->
+    <module name="RegexpSinglelineJava">
+      <property name="id" value="F2_SystemOutPrintln"/>
+      <property name="format" value="System\.(out|err)\.print(ln)?\s*\("/>
+      <property name="ignoreComments" value="true"/>
+      <property name="message" value="F2: use SLF4J logger instead of System.out/err (CLI entry points are allowed via suppression)"/>
+    </module>
+
+    <!-- F3: .printStackTrace() in production code -->
+    <module name="RegexpSinglelineJava">
+      <property name="id" value="F3_PrintStackTrace"/>
+      <property name="format" value="\.printStackTrace\s*\("/>
+      <property name="ignoreComments" value="true"/>
+      <property name="message" value="F3: use logger.error(msg, throwable) instead of printStackTrace()"/>
+    </module>
+
+    <!-- J1 intentionally NOT included:
+         Checkstyle MagicNumber only catches the in-file half (literal in method body).
+         The valuable half — "use existing constant from Constant.java" — is cross-file
+         and belongs to skill/LLM review. As a hard gate the in-file half alone is too
+         noisy (HTTP codes, byte sizes, sleep millis, small loop bounds all flagged). -->
+
+    <!-- L2: line length > 100 chars (already in checkStyleAll for framework, kept here for completeness when expanded to other modules) -->
+    <module name="LineLength">
+      <property name="id" value="L2_LineLength"/>
+      <property name="max" value="100"/>
+      <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
+    </module>
+  </module>
+</module>

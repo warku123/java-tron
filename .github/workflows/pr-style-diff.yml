@@ -1,0 +1,68 @@
+name: Style / Diff Check
+
+on:
+  pull_request:
+    branches: [ 'develop', 'release_**' ]
+    types: [ opened, synchronize, reopened ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  style-diff:
+    name: Style / Diff Check
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Run strict Checkstyle (ignoreFailures=true, never fails build)
+        run: ./gradlew :framework:checkstyleStrict
+
+      - name: Install reviewdog
+        uses: reviewdog/action-setup@v1
+        with:
+          reviewdog_version: latest
+
+      - name: Report diff-line violations to PR
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          reviewdog \
+            -f=checkstyle \
+            -name="checkstyle-strict" \
+            -reporter=github-pr-review \
+            -filter-mode=added \
+            -fail-level=any \
+            -level=error \
+            < framework/build/reports/checkstyle/strict.xml
+
+      - name: Upload full Checkstyle report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: checkstyleStrict-report
+          path: framework/build/reports/checkstyle/

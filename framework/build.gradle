@@ -90,6 +90,20 @@ tasks.register('lint', Checkstyle) {
     ignoreFailures = false
 }
 
+// Trial task for proposal: add-diff-only-style-check
+// Full-repo scan with strict rules; never fails build (CI uses reviewdog + filter_mode=added).
+tasks.register('checkstyleStrict', Checkstyle) {
+    configFile = file('config/checkstyle/checkStyleStrict.xml')
+    source 'src/main/java'
+    include '**/*.java'
+    classpath = files()
+    ignoreFailures = true
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
 tasks.matching { it instanceof Test }.all {
     testLogging.events = ["failed", "passed", "skipped"]
 }
