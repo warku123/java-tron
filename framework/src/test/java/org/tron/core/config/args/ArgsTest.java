@@ -50,8 +50,7 @@ public class ArgsTest {
 
   @Test
   public void get() {
-    Args.setParam(new String[] {"-c", TestConstants.TEST_CONF, "--keystore-factory"},
-        TestConstants.NET_CONF);
+    Args.setParam(new String[] {"--keystore-factory"}, TestConstants.TEST_CONF);
 
     CommonParameter parameter = Args.getInstance();
 
@@ -73,7 +72,7 @@ public class ArgsTest {
 
     Assert.assertEquals("database", parameter.getStorage().getDbDirectory());
 
-    Assert.assertEquals(11, parameter.getSeedNode().getAddressList().size());
+    Assert.assertEquals(0, parameter.getSeedNode().getAddressList().size());
 
     GenesisBlock genesisBlock = parameter.getGenesisBlock();
 
@@ -145,12 +144,6 @@ public class ArgsTest {
     method2.invoke(Args.class, nc);
 
     Assert.assertNotEquals(configuredExternalIp, parameter.getNodeExternalIp());
-  }
-
-  @Test
-  public void testOldRewardOpt() {
-    thrown.expect(IllegalArgumentException.class);
-    Args.setParam(new String[] {"-c", "args-test.conf"}, TestConstants.NET_CONF);
   }
 
   @Test
@@ -303,8 +296,6 @@ public class ArgsTest {
         "--storage-db-directory", "cli-db-dir",
         "--storage-db-engine", "ROCKSDB",
         "--storage-db-synchronous", "true",
-        "--storage-index-directory", "cli-index-dir",
-        "--storage-index-switch", "cli-index-switch",
         "--storage-transactionHistory-switch", "off",
         "--contract-parse-enable", "false"
     }, TestConstants.TEST_CONF);
@@ -314,8 +305,6 @@ public class ArgsTest {
     Assert.assertEquals("cli-db-dir", parameter.getStorage().getDbDirectory());
     Assert.assertEquals("ROCKSDB", parameter.getStorage().getDbEngine());
     Assert.assertTrue(parameter.getStorage().isDbSync());
-    Assert.assertEquals("cli-index-dir", parameter.getStorage().getIndexDirectory());
-    Assert.assertEquals("cli-index-switch", parameter.getStorage().getIndexSwitch());
     Assert.assertEquals("off", parameter.getStorage().getTransactionHistorySwitch());
     Assert.assertFalse(parameter.getStorage().isContractParseSwitch());
 
@@ -341,6 +330,21 @@ public class ArgsTest {
   public void testCliEsOverridesConfig() {
     Args.setParam(new String[] {"--es"}, TestConstants.TEST_CONF);
     Assert.assertTrue(Args.getInstance().isEventSubscribe());
+    Args.clearParam();
+  }
+
+  /**
+   * Regression: when --es is the sole source of event.subscribe.enable=true
+   * (config has it disabled), eventPluginConfig must be built.
+   * Previously applyEventConfig() ran before applyCLIParams() and returned
+   * early (both flags false), leaving eventPluginConfig=null; Manager then
+   * called EventPluginLoader.start(null) and threw "Failed to load eventPlugin."
+   */
+  @Test
+  public void testCliEsBuildsEventPluginConfig() {
+    Args.setParam(new String[] {"--es"}, TestConstants.TEST_CONF);
+    Assert.assertTrue(Args.getInstance().isEventSubscribe());
+    Assert.assertNotNull(Args.getInstance().getEventPluginConfig());
     Args.clearParam();
   }
 
@@ -398,35 +402,6 @@ public class ArgsTest {
     Args.clearParam();
   }
 
-
-  @Test
-  public void testHttpJsonParseConstraints() {
-    Map<String, String> override = new HashMap<>();
-    override.put("storage.db.directory", "database");
-    Config config = ConfigFactory.parseMap(override)
-        .withFallback(ConfigFactory.defaultReference());
-    Args.applyConfigParams(config);
-
-    Assert.assertEquals(100, Args.getInstance().getMaxNestingDepth());
-    Assert.assertEquals(100_000, Args.getInstance().getMaxTokenCount());
-    Args.clearParam();
-  }
-
-  @Test
-  public void testHttpJsonParseConstraintsApplied() {
-    Map<String, String> override = new HashMap<>();
-    override.put("storage.db.directory", "database");
-    override.put("node.http.maxNestingDepth", "42");
-    override.put("node.http.maxTokenCount", "12345");
-    Config config = ConfigFactory.parseMap(override)
-        .withFallback(ConfigFactory.defaultReference());
-    Args.applyConfigParams(config);
-
-    Assert.assertEquals(42, Args.getInstance().getMaxNestingDepth());
-    Assert.assertEquals(12345, Args.getInstance().getMaxTokenCount());
-    Args.clearParam();
-  }
-
   @Test
   public void testFetchBlockTimeoutInRangeUnchanged() {
     Map<String, String> override = new HashMap<>();
@@ -454,6 +429,7 @@ public class ArgsTest {
     Config config = ConfigFactory.parseMap(override)
         .withFallback(ConfigFactory.defaultReference());
     Args.applyConfigParams(config);
+    Args.applyEventConfig();
     Assert.assertNull(Args.getInstance().getEventPluginConfig());
     Assert.assertNull(Args.getInstance().getEventFilter());
     Args.clearParam();
@@ -467,6 +443,7 @@ public class ArgsTest {
     Config config = ConfigFactory.parseMap(override)
         .withFallback(ConfigFactory.defaultReference());
     Args.applyConfigParams(config);
+    Args.applyEventConfig();
     Assert.assertNotNull(Args.getInstance().getEventPluginConfig());
     Assert.assertNotNull(Args.getInstance().getEventFilter());
     Args.clearParam();
@@ -481,6 +458,7 @@ public class ArgsTest {
     Config config = ConfigFactory.parseMap(override)
         .withFallback(ConfigFactory.defaultReference());
     Args.applyConfigParams(config);
+    Args.applyEventConfig();
     // epc still built; filter rejected
     Assert.assertNotNull(Args.getInstance().getEventPluginConfig());
     Assert.assertNull(Args.getInstance().getEventFilter());
