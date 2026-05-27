@@ -46,6 +46,15 @@
     <property name="message" value="B2: likely misspelling — check the word against a dictionary"/>
   </module>
 
+  <!-- L2: line length > 100 chars.
+       This is a FileSetCheck, NOT an AST check — must sit at Checker level, not inside TreeWalker. -->
+  <module name="LineLength">
+    <property name="id" value="L2_LineLength"/>
+    <property name="max" value="100"/>
+    <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
+    <property name="fileExtensions" value="java"/>
+  </module>
+
   <module name="TreeWalker">
     <!-- Allow //CHECKSTYLE:OFF / //CHECKSTYLE:ON local suppression -->
     <module name="SuppressionCommentFilter"/>
@@ -115,12 +124,5 @@
          The valuable half — "use existing constant from Constant.java" — is cross-file
          and belongs to skill/LLM review. As a hard gate the in-file half alone is too
          noisy (HTTP codes, byte sizes, sleep millis, small loop bounds all flagged). -->
-
-    <!-- L2: line length > 100 chars (already in checkStyleAll for framework, kept here for completeness when expanded to other modules) -->
-    <module name="LineLength">
-      <property name="id" value="L2_LineLength"/>
-      <property name="max" value="100"/>
-      <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
-    </module>
   </module>
 </module>
