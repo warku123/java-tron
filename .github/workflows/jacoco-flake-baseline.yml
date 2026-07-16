@@ -1,0 +1,242 @@
+name: JaCoCo Flake Baseline
+
+on:
+  pull_request:
+    branches: ['develop']
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  jacoco-flake-baseline:
+    name: JaCoCo Flake Baseline (JDK 8 / x86_64)
+    # Limit to the experimental branch so this does not leak into general PRs.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'test/flaky-jacoco-coverage' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    container:
+      image: eclipse-temurin:8-jdk
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      GRADLE_USER_HOME: /github/home/.gradle
+
+    permissions:
+      contents: read
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Install build-time tools (mirrors the coverage lane).
+      # ------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          apt-get update
+          apt-get install -y git wget unzip build-essential curl jq python3
+
+      # ------------------------------------------------------------------
+      # 2. Checkout the current PR commit.
+      # ------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # ------------------------------------------------------------------
+      # 3. Gradle: clean build
+      # ------------------------------------------------------------------
+      - name: Gradle clean build
+        id: g_build
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew clean build \
+            --no-daemon --no-build-cache --console=plain --stacktrace \
+            > evidence/gradle-build.log 2>&1
+          RC=$?
+          set -e
+          echo "exit=$RC" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 4. Gradle: testWithRocksDb
+      # ------------------------------------------------------------------
+      - name: Gradle testWithRocksDb
+        id: g_trdb
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew :framework:testWithRocksDb \
+            --no-daemon --no-build-cache --console=plain --stacktrace \
+            > evidence/gradle-testWithRocksDb.log 2>&1
+          RC=$?
+          set -e
+          echo "exit=$RC" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 5. Gradle: jacocoTestReport
+      # ------------------------------------------------------------------
+      - name: Gradle jacocoTestReport
+        id: g_jacoco
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew jacocoTestReport \
+            --no-daemon --no-build-cache --console=plain --stacktrace \
+            > evidence/gradle-jacoco.log 2>&1
+          RC=$?
+          set -e
+          echo "exit=$RC" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 6. Write environment + run metadata (no full env dump).
+      # ------------------------------------------------------------------
+      - name: Write metadata
+        id: meta
+        if: always()
+        env:
+          BUILD_EXIT: ${{ steps.g_build.outputs.exit || '-1' }}
+          TRDB_EXIT: ${{ steps.g_trdb.outputs.exit || '-1' }}
+          JACOCO_EXIT: ${{ steps.g_jacoco.outputs.exit || '-1' }}
+          PR_NUM: ${{ github.event.pull_request.number || 'manual' }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+
+          SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+          SHORT="${SHA:0:12}"
+          RUN_ID="${GITHUB_RUN_ID:-manual}"
+          RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-0}"
+          TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          java_ver="$(java -version 2>&1 | head -1 || echo unknown)"
+          gradle_ver="$(grep -oP 'gradle-\K[\d.]+' gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo unknown)"
+          os_info="$(uname -a 2>/dev/null || echo unknown)"
+          cpu_count="$(nproc 2>/dev/null || echo 0)"
+          ulimit_val="$(ulimit -a 2>/dev/null || echo unknown)"
+
+          jq -n \
+            --arg sha "$SHA" \
+            --arg short_sha "$SHORT" \
+            --arg run_id "$RUN_ID" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            --arg pr_number "$PR_NUM" \
+            --arg event "${{ github.event_name }}" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg java_version "$java_ver" \
+            --arg gradle_version "$gradle_ver" \
+            --arg os "$os_info" \
+            --arg cpu_count "$cpu_count" \
+            --arg ulimit "$ulimit_val" \
+            --argjson build_exit "$BUILD_EXIT" \
+            --argjson trdb_exit "$TRDB_EXIT" \
+            --argjson jacoco_exit "$JACOCO_EXIT" \
+            '{
+              sha: $sha,
+              short_sha: $short_sha,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              pr_number: $pr_number,
+              event: $event,
+              timestamp_utc: $timestamp,
+              java_version: $java_version,
+              gradle_version: $gradle_version,
+              os: $os,
+              cpu_count: $cpu_count,
+              ulimit: $ulimit,
+              gradle_exit_codes: {
+                build: $build_exit,
+                testWithRocksDb: $trdb_exit,
+                jacocoTestReport: $jacoco_exit
+              }
+            }' > evidence/metadata.json
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 7. Generate manifest + summary JSON via Python stdlib script.
+      # ------------------------------------------------------------------
+      - name: Generate manifest and summary
+        id: summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/jacoco_baseline_summary.py \
+            --root . \
+            --output evidence/summary.json \
+            --manifest evidence/manifest.json \
+            --gradle-log-glob "evidence/gradle-*.log"
+
+      # ------------------------------------------------------------------
+      # 8. Write $GITHUB_STEP_SUMMARY.
+      # ------------------------------------------------------------------
+      - name: Write step summary
+        if: always()
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          BUILD_EXIT: ${{ steps.g_build.outputs.exit || '-1' }}
+          TRDB_EXIT: ${{ steps.g_trdb.outputs.exit || '-1' }}
+          JACOCO_EXIT: ${{ steps.g_jacoco.outputs.exit || '-1' }}
+        run: |
+          set -euo pipefail
+          EXEC_COUNT="$(jq -r '.jacoco.exec_count // 0' evidence/summary.json)"
+          XML_COUNT="$(jq -r '.jacoco.report_count // 0' evidence/summary.json)"
+          SUITE_COUNT="$(jq -r '.junit.suite_count // 0' evidence/summary.json)"
+          {
+            echo "### JaCoCo Flake Baseline"
+            echo ""
+            echo "- **SHA**: $SHORT_SHA"
+            echo "- **build** exit: $BUILD_EXIT"
+            echo "- **testWithRocksDb** exit: $TRDB_EXIT"
+            echo "- **jacocoTestReport** exit: $JACOCO_EXIT"
+            echo "- **.exec** files: $EXEC_COUNT"
+            echo "- **JaCoCo XML** reports: $XML_COUNT"
+            echo "- **JUnit suites**: $SUITE_COUNT"
+            echo "- **Summary**: \`evidence/summary.json\`"
+            echo "- **Manifest**: \`evidence/manifest.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------------
+      # 9. Upload all evidence (runs even if Gradle steps "failed").
+      # ------------------------------------------------------------------
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: jacoco-flake-baseline-pr${{ steps.meta.outputs.pr_number }}-${{ steps.meta.outputs.short_sha }}-run${{ steps.meta.outputs.run_id }}-attempt${{ steps.meta.outputs.run_attempt }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            evidence/
+            framework/build/jacoco/**/*.exec
+            **/build/reports/jacoco/**/jacocoTestReport.xml
+            **/build/test-results/**
+            **/build/reports/tests/**
+            **/hs_err_*.log
+            **/replay_*.txt
+            **/*.hprof
+
+      # ------------------------------------------------------------------
+      # 10. Fail the job AFTER artifact upload if any Gradle step was
+      #     non-zero (original semantics: evidence is preserved regardless).
+      # ------------------------------------------------------------------
+      - name: Fail on Gradle error
+        if: always()
+        run: |
+          set -euo pipefail
+          BUILD_EXIT="${{ steps.g_build.outputs.exit || '0' }}"
+          TRDB_EXIT="${{ steps.g_trdb.outputs.exit || '0' }}"
+          JACOCO_EXIT="${{ steps.g_jacoco.outputs.exit || '0' }}"
+          if [ "$BUILD_EXIT" != "0" ] || [ "$TRDB_EXIT" != "0" ] || [ "$JACOCO_EXIT" != "0" ]; then
+            echo "One or more Gradle steps exited non-zero: build=$BUILD_EXIT testWithRocksDb=$TRDB_EXIT jacocoTestReport=$JACOCO_EXIT"
+            exit 1
+          fi
+          echo "All Gradle steps passed."
