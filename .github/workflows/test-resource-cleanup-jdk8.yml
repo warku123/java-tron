@@ -1,0 +1,160 @@
+name: Resource Cleanup JDK 8 Verification
+
+on:
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  resource-cleanup:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.ref == 'verify/test-resource-cleanup-jdk8' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Resource cleanup (round ${{ matrix.round }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: eclipse-temurin:8-jdk
+    defaults:
+      run:
+        shell: bash
+    env:
+      GRADLE_USER_HOME: /github/home/.gradle
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        round: [1, 2, 3]
+
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          apt-get update
+          apt-get install -y git wget unzip build-essential curl jq
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.sha }}
+
+      - name: Restrict manual dispatch to verifier ref
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          EXPECTED_REF='verify/test-resource-cleanup-jdk8'
+          CURRENT_SHA=$(git rev-parse HEAD)
+          EXPECTED_SHA=$(git rev-parse "refs/remotes/origin/$EXPECTED_REF")
+          if [ "$GITHUB_REF" != "refs/heads/$EXPECTED_REF" ] || [ "$CURRENT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "Manual dispatch must run from $EXPECTED_REF; GITHUB_REF=$GITHUB_REF, checked_out_sha=$CURRENT_SHA, expected_sha=$EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+      - name: Prepare isolated test configuration
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > evidence/resource-cleanup-verification.init.gradle <<'EOF'
+          gradle.projectsLoaded {
+              if (!gradle.rootProject.hasProperty('resourceCleanupVerification')) {
+                  throw new GradleException('resourceCleanupVerification property is required')
+              }
+          }
+          EOF
+
+      - name: Run repaired tests and JaCoCo report
+        id: verification
+        continue-on-error: true
+        run: |
+          set +e
+          ./gradlew :framework:test \
+            --tests org.tron.common.backup.BackupManagerTest \
+            --tests org.tron.common.backup.BackupServerTest \
+            --tests org.tron.core.net.messagehandler.TransactionsMsgHandlerTest \
+            --rerun-tasks --no-daemon --no-build-cache --console=plain --stacktrace \
+            -PresourceCleanupVerification \
+            --init-script evidence/resource-cleanup-verification.init.gradle \
+            > evidence/framework-test.log 2>&1
+          TEST_RC=$?
+
+          ./gradlew :framework:jacocoTestReport \
+            --no-daemon --no-build-cache --console=plain --stacktrace \
+            -PresourceCleanupVerification \
+            --init-script evidence/resource-cleanup-verification.init.gradle \
+            > evidence/framework-jacoco-report.log 2>&1
+          REPORT_RC=$?
+
+          printf '%s\n' "$TEST_RC" > evidence/test.exit-code
+          printf '%s\n' "$REPORT_RC" > evidence/report.exit-code
+          echo "test_exit_code=$TEST_RC" >> "$GITHUB_OUTPUT"
+          echo "report_exit_code=$REPORT_RC" >> "$GITHUB_OUTPUT"
+          exit $(( TEST_RC != 0 || REPORT_RC != 0 ))
+
+      - name: Collect metadata and crash diagnostics
+        if: always()
+        env:
+          TEST_RC: ${{ steps.verification.outputs.test_exit_code || 'unavailable' }}
+          REPORT_RC: ${{ steps.verification.outputs.report_exit_code || 'unavailable' }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/crash-diagnostics
+          find . -type f \( -name 'hs_err_pid*.log' -o -name 'replay_*.log' -o -name '*.hprof' \) \
+            -not -path './.git/*' -exec cp --parents '{}' evidence/crash-diagnostics/ \; || true
+          JAVA_VERSION=$(java -version 2>&1 | tr '\n' ' ')
+          GRADLE_VERSION=$(./gradlew --version 2>&1 | tr '\n' ' ')
+          jq -n \
+            --arg sha "$(git rev-parse HEAD)" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg round "${{ matrix.round }}" \
+            --arg java_version "$JAVA_VERSION" \
+            --arg gradle_version "$GRADLE_VERSION" \
+            --arg test_exit_code "$TEST_RC" \
+            --arg report_exit_code "$REPORT_RC" \
+            '{sha: $sha, run_id: $run_id, run_attempt: $run_attempt, matrix_round: $round,
+              java_version: $java_version, gradle_version: $gradle_version,
+              exit_codes: {framework_test: $test_exit_code, framework_jacoco_test_report: $report_exit_code},
+              config_invariants: {gradle_property: "-PresourceCleanupVerification", property_required_by_init_script: true,
+                maxParallelForks: 1, forkEvery: 0, retry_maxRetries: 0,
+                retry_maxFailures: 1, test_task: ":framework:test", report_task: ":framework:jacocoTestReport"}}' \
+            > evidence/metadata.json
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: resource-cleanup-pr-${{ github.event.pull_request.number || 'dispatch' }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-round-${{ matrix.round }}
+          if-no-files-found: warn
+          path: |
+            evidence/
+            framework/build/test-results/
+            framework/build/reports/tests/
+            framework/build/jacoco/
+            framework/build/jacocoHtml/
+            framework/build/reports/jacoco/
+
+      - name: Verification summary
+        if: always()
+        env:
+          TEST_RC: ${{ steps.verification.outputs.test_exit_code || 'unavailable' }}
+          REPORT_RC: ${{ steps.verification.outputs.report_exit_code || 'unavailable' }}
+        run: |
+          {
+            echo '### Resource cleanup JDK 8 verification'
+            echo "- Round: ${{ matrix.round }}"
+            echo "- Tests: \\`:framework:test\\` (three repaired classes), exit: \\`${TEST_RC}\\`"
+            echo "- Report: \\`:framework:jacocoTestReport\\`, exit: \\`${REPORT_RC}\\`"
+            echo "- Property: \`-PresourceCleanupVerification\`"
+            echo "- Isolation: maxParallelForks=1, forkEvery=0, retry maxRetries=0/maxFailures=1"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on test or report failure
+        if: always()
+        env:
+          TEST_RC: ${{ steps.verification.outputs.test_exit_code || 'unavailable' }}
+          REPORT_RC: ${{ steps.verification.outputs.report_exit_code || 'unavailable' }}
+        run: |
+          if [ "$TEST_RC" != '0' ] || [ "$REPORT_RC" != '0' ]; then
+            echo "Verification failed: test=$TEST_RC report=$REPORT_RC" >&2
+            exit 1
+          fi

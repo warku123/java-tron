@@ -106,9 +106,10 @@ run {
 }
 
 def configureTestTask = { Task t ->
+    def resourceCleanupVerification = project.hasProperty('resourceCleanupVerification')
     t.retry {
-        maxRetries = 5
-        maxFailures = 20
+        maxRetries = resourceCleanupVerification ? 0 : 5
+        maxFailures = resourceCleanupVerification ? 1 : 20
     }
     t.testLogging {
         exceptionFormat = 'full'
@@ -122,11 +123,15 @@ def configureTestTask = { Task t ->
         t.exclude 'org/tron/common/runtime/vm/WithdrawRewardTest.class'
     }
     t.maxHeapSize = "512m"
-    t.maxParallelForks = Math.max(1, Math.min(4, Runtime.runtime.availableProcessors()))
+    t.maxParallelForks = resourceCleanupVerification ? 1
+            : Math.max(1, Math.min(4, Runtime.runtime.availableProcessors()))
     t.systemProperty 'runPrecompileBenchmark',
             System.getProperty('runPrecompileBenchmark', 'false')
     t.doFirst {
-        t.forkEvery = 100
+        t.forkEvery = resourceCleanupVerification ? 0 : 100
+        if (resourceCleanupVerification) {
+            logger.lifecycle("resourceCleanupVerification: ${t.path} maxRetries=0 maxFailures=1 maxParallelForks=1 forkEvery=0")
+        }
     }
 }
 
