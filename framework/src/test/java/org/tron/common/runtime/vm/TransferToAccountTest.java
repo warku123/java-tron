@@ -31,6 +31,7 @@ import org.tron.core.exception.ReceiptCheckErrException;
 import org.tron.core.exception.VMIllegalException;
 import org.tron.core.store.StoreFactory;
 import org.tron.core.vm.EnergyCost;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.repository.RepositoryImpl;
 import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.Transaction;
@@ -257,8 +258,15 @@ public class TransferToAccountTest extends BaseTest {
 
     VMActuator vmActuator = new VMActuator(true);
 
-    vmActuator.validate(context);
-    vmActuator.execute(context);
+    try {
+      vmActuator.validate(context);
+      vmActuator.execute(context);
+    } finally {
+      // A constant call installs a thread-local VM config view
+      // (ConfigLoader.load with isolate=true). Drop it so later tests running on
+      // this JUnit thread are not silently executed against this test's flags.
+      VMConfig.clearLocalSnapshot();
+    }
 
     ProgramResult result = context.getProgramResult();
 
