@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -30,6 +31,9 @@ import org.tron.protos.Protocol.Transaction;
 
 @Slf4j
 public class Create2Test extends VMTestBase {
+  private long allowTvmTransferTrc10;
+  private long allowTvmConstantinople;
+  private long allowTvmIstanbul;
   /*
   pragma solidity 0.5.0;
   contract Factory {
@@ -108,6 +112,17 @@ public class Create2Test extends VMTestBase {
   @Before
   public void before() {
     ConfigLoader.disable = false;
+    allowTvmTransferTrc10 = manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
+    allowTvmConstantinople = manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
+    allowTvmIstanbul = manager.getDynamicPropertiesStore().getAllowTvmIstanbul();
+  }
+
+  @After
+  public void restoreForkFlags() {
+    // Prevent fork-flag changes from polluting later tests in the same JVM.
+    manager.getDynamicPropertiesStore().saveAllowTvmTransferTrc10(allowTvmTransferTrc10);
+    manager.getDynamicPropertiesStore().saveAllowTvmConstantinople(allowTvmConstantinople);
+    manager.getDynamicPropertiesStore().saveAllowTvmIstanbul(allowTvmIstanbul);
   }
 
   @Test
