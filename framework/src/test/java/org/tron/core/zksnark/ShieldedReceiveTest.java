@@ -21,6 +21,7 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -126,6 +127,7 @@ public class ShieldedReceiveTest extends BaseTest {
       "librustzcashSaplingCheckSpend error",
       "Rt is invalid."
   ));
+  private long allowShieldedTransaction;
 
   private static final String FROM_ADDRESS;
   private static final String ADDRESS_ONE_PRIVATE_KEY;
@@ -167,12 +169,20 @@ public class ShieldedReceiveTest extends BaseTest {
    */
   @Before
   public void init() {
+    allowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
+        .getAllowShieldedTransaction();
     if (init) {
       return;
     }
     consensusService.start();
     chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(10_000_000_000L);
     init = true;
+  }
+
+  @After
+  public void restoreAllowShieldedTransaction() {
+    chainBaseManager.getDynamicPropertiesStore()
+        .saveAllowShieldedTransaction(allowShieldedTransaction);
   }
 
   private static byte[] randomUint256() {
