@@ -127,7 +127,7 @@ public class ShieldedReceiveTest extends BaseTest {
       "librustzcashSaplingCheckSpend error",
       "Rt is invalid."
   ));
-  private long allowShieldedTransaction;
+  private long previousAllowShieldedTransaction;
 
   private static final String FROM_ADDRESS;
   private static final String ADDRESS_ONE_PRIVATE_KEY;
@@ -169,7 +169,7 @@ public class ShieldedReceiveTest extends BaseTest {
    */
   @Before
   public void init() {
-    allowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
+    previousAllowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
         .getAllowShieldedTransaction();
     if (init) {
       return;
@@ -182,7 +182,7 @@ public class ShieldedReceiveTest extends BaseTest {
   @After
   public void restoreAllowShieldedTransaction() {
     chainBaseManager.getDynamicPropertiesStore()
-        .saveAllowShieldedTransaction(allowShieldedTransaction);
+        .saveAllowShieldedTransaction(previousAllowShieldedTransaction);
   }
 
   private static byte[] randomUint256() {

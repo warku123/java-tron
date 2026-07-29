@@ -31,9 +31,9 @@ import org.tron.protos.Protocol.Transaction;
 
 @Slf4j
 public class Create2Test extends VMTestBase {
-  private long allowTvmTransferTrc10;
-  private long allowTvmConstantinople;
-  private long allowTvmIstanbul;
+  private long previousAllowTvmTransferTrc10;
+  private long previousAllowTvmConstantinople;
+  private long previousAllowTvmIstanbul;
   /*
   pragma solidity 0.5.0;
   contract Factory {
@@ -112,17 +112,21 @@ public class Create2Test extends VMTestBase {
   @Before
   public void before() {
     ConfigLoader.disable = false;
-    allowTvmTransferTrc10 = manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
-    allowTvmConstantinople = manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
-    allowTvmIstanbul = manager.getDynamicPropertiesStore().getAllowTvmIstanbul();
+    previousAllowTvmTransferTrc10 =
+        manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
+    previousAllowTvmConstantinople =
+        manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
+    previousAllowTvmIstanbul = manager.getDynamicPropertiesStore().getAllowTvmIstanbul();
   }
 
   @After
   public void restoreForkFlags() {
     // Prevent fork-flag changes from polluting later tests in the same JVM.
-    manager.getDynamicPropertiesStore().saveAllowTvmTransferTrc10(allowTvmTransferTrc10);
-    manager.getDynamicPropertiesStore().saveAllowTvmConstantinople(allowTvmConstantinople);
-    manager.getDynamicPropertiesStore().saveAllowTvmIstanbul(allowTvmIstanbul);
+    manager.getDynamicPropertiesStore()
+        .saveAllowTvmTransferTrc10(previousAllowTvmTransferTrc10);
+    manager.getDynamicPropertiesStore()
+        .saveAllowTvmConstantinople(previousAllowTvmConstantinople);
+    manager.getDynamicPropertiesStore().saveAllowTvmIstanbul(previousAllowTvmIstanbul);
   }
 
   @Test

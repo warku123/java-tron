@@ -25,9 +25,9 @@ import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Result.contractResult;
 
 public class TransferFailedEnergyTest extends VMTestBase {
-  private long allowTvmTransferTrc10;
-  private long allowTvmConstantinople;
-  private long allowTvmSolidity059;
+  private long previousAllowTvmTransferTrc10;
+  private long previousAllowTvmConstantinople;
+  private long previousAllowTvmSolidity059;
   /*
   pragma solidity ^0.5.4;
   contract EnergyOfTransferFailedTest {
@@ -230,17 +230,21 @@ public class TransferFailedEnergyTest extends VMTestBase {
 
   @Before
   public void snapshotForkFlags() {
-    allowTvmTransferTrc10 = manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
-    allowTvmConstantinople = manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
-    allowTvmSolidity059 = manager.getDynamicPropertiesStore().getAllowTvmSolidity059();
+    previousAllowTvmTransferTrc10 =
+        manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
+    previousAllowTvmConstantinople =
+        manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
+    previousAllowTvmSolidity059 = manager.getDynamicPropertiesStore().getAllowTvmSolidity059();
   }
 
   @After
   public void restoreForkFlags() {
     // Prevent fork-flag changes from polluting later tests in the same JVM.
-    manager.getDynamicPropertiesStore().saveAllowTvmTransferTrc10(allowTvmTransferTrc10);
-    manager.getDynamicPropertiesStore().saveAllowTvmConstantinople(allowTvmConstantinople);
-    manager.getDynamicPropertiesStore().saveAllowTvmSolidity059(allowTvmSolidity059);
+    manager.getDynamicPropertiesStore()
+        .saveAllowTvmTransferTrc10(previousAllowTvmTransferTrc10);
+    manager.getDynamicPropertiesStore()
+        .saveAllowTvmConstantinople(previousAllowTvmConstantinople);
+    manager.getDynamicPropertiesStore().saveAllowTvmSolidity059(previousAllowTvmSolidity059);
   }
 
   @Test

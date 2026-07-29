@@ -39,8 +39,8 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
   private static final String OWNER_ACCOUNT_INVALID;
   private static final long initBalance = 10_000_000_000L;
   private static final long frozenBalance = 1_000_000_000L;
-  private long allowTvmConstantinople;
-  private long allowTvmSolidity059;
+  private long previousAllowTvmConstantinople;
+  private long previousAllowTvmSolidity059;
 
   static {
     Args.setParam(new String[]{"--output-directory", dbPath()}, TestConstants.TEST_CONF);
@@ -55,8 +55,10 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
    */
   @Before
   public void createAccountCapsule() {
-    allowTvmConstantinople = dbManager.getDynamicPropertiesStore().getAllowTvmConstantinople();
-    allowTvmSolidity059 = dbManager.getDynamicPropertiesStore().getAllowTvmSolidity059();
+    previousAllowTvmConstantinople =
+        dbManager.getDynamicPropertiesStore().getAllowTvmConstantinople();
+    previousAllowTvmSolidity059 =
+        dbManager.getDynamicPropertiesStore().getAllowTvmSolidity059();
     AccountCapsule ownerCapsule = new AccountCapsule(ByteString.copyFromUtf8("owner"),
         ByteString.copyFrom(ByteArray.fromHexString(OWNER_ADDRESS)), AccountType.Normal,
         initBalance);
@@ -71,8 +73,9 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
   @After
   public void restoreForkFlags() {
     // Prevent fork-flag changes from polluting later tests in the same JVM.
-    dbManager.getDynamicPropertiesStore().saveAllowTvmConstantinople(allowTvmConstantinople);
-    dbManager.getDynamicPropertiesStore().saveAllowTvmSolidity059(allowTvmSolidity059);
+    dbManager.getDynamicPropertiesStore()
+        .saveAllowTvmConstantinople(previousAllowTvmConstantinople);
+    dbManager.getDynamicPropertiesStore().saveAllowTvmSolidity059(previousAllowTvmSolidity059);
   }
 
   private Any getContractForBandwidth(String ownerAddress) {

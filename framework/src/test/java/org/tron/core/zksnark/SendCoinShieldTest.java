@@ -107,7 +107,7 @@ public class SendCoinShieldTest extends BaseTest {
   private static final int VOTE_SCORE = 2;
   private static final String DESCRIPTION = "TRX";
   private static final String URL = "https://tron.network";
-  private long allowShieldedTransaction;
+  private long previousAllowShieldedTransaction;
   @Resource
   private Wallet wallet;
 
@@ -132,7 +132,7 @@ public class SendCoinShieldTest extends BaseTest {
    */
   @Before
   public void init() {
-    allowShieldedTransaction = dbManager.getDynamicPropertiesStore()
+    previousAllowShieldedTransaction = dbManager.getDynamicPropertiesStore()
         .getAllowShieldedTransaction();
     if (init) {
       return;
@@ -162,7 +162,7 @@ public class SendCoinShieldTest extends BaseTest {
   @After
   public void restoreAllowShieldedTransaction() {
     dbManager.getDynamicPropertiesStore()
-        .saveAllowShieldedTransaction(allowShieldedTransaction);
+        .saveAllowShieldedTransaction(previousAllowShieldedTransaction);
   }
 
   private void addZeroValueOutputNote(ZenTransactionBuilder builder) throws ZksnarkException {

@@ -37,7 +37,7 @@ public class BackupManagerTest {
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
   private BackupManager manager;
   private BackupServer backupServer;
-  private BiFunction<String, Boolean, InetAddress> savedLookup;
+  private BiFunction<String, Boolean, InetAddress> previousDnsLookup;
   private boolean backupServerClosed;
 
   @Before
@@ -47,7 +47,7 @@ public class BackupManagerTest {
     CommonParameter.getInstance().setBackupPort(PublicMethod.chooseRandomPort());
     manager = new BackupManager();
     backupServer = new BackupServer(manager);
-    savedLookup = InetUtil.dnsLookup;
+    previousDnsLookup = InetUtil.dnsLookup;
   }
 
   @After
@@ -72,7 +72,7 @@ public class BackupManagerTest {
           failure.addSuppressed(t);
         }
       } finally {
-        InetUtil.dnsLookup = savedLookup;
+        InetUtil.dnsLookup = previousDnsLookup;
         Args.clearParam();
       }
     }
