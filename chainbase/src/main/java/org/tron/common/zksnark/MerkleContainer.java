@@ -90,7 +90,6 @@ public class MerkleContainer {
 
   public void putMerkleTreeIntoStore(byte[] key, IncrementalMerkleTreeCapsule capsule) {
     incrementalMerkleTreeStore.put(key, capsule);
-    ShieldedMerkleDiag.anchorPut(key, this);
   }
 
   public MerklePath merklePath(byte[] rt) throws ZksnarkException {

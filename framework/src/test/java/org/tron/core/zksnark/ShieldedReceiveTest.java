@@ -8,7 +8,6 @@ import com.google.common.primitives.Bytes;
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import java.lang.reflect.Field;
 import java.security.SignatureException;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -47,9 +46,7 @@ import org.tron.common.zksnark.LibrustzcashParam.CheckSpendParams;
 import org.tron.common.zksnark.LibrustzcashParam.IvkToPkdParams;
 import org.tron.common.zksnark.LibrustzcashParam.OutputProofParams;
 import org.tron.common.zksnark.LibrustzcashParam.SpendSigParams;
-import org.tron.common.zksnark.ShieldedMerkleDiag;
 import org.tron.consensus.dpos.DposSlot;
-import org.tron.consensus.dpos.DposTask;
 import org.tron.core.Wallet;
 import org.tron.core.actuator.Actuator;
 import org.tron.core.actuator.ActuatorCreator;
@@ -81,7 +78,6 @@ import org.tron.core.exception.TransactionExpirationException;
 import org.tron.core.exception.VMIllegalException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.utils.TransactionUtil;
 import org.tron.core.zen.ZenTransactionBuilder;
 import org.tron.core.zen.ZenTransactionBuilder.ReceiveDescriptionInfo;
@@ -147,15 +143,11 @@ public class ShieldedReceiveTest extends BaseTest {
   @Resource
   private ConsensusService consensusService;
   @Resource
-  private DposTask dposTask;
-  @Resource
   private Wallet wallet;
   @Resource
   private DposSlot dposSlot;
-  @Resource
-  private SnapshotManager snapshotManager;
-
   private static boolean init;
+  private static boolean consensusScheduleInitialized;
 
   static {
     Args.setParam(new String[] {"--output-directory", dbPath(), "-w"}, SHIELD_CONF);
@@ -173,14 +165,10 @@ public class ShieldedReceiveTest extends BaseTest {
    */
   @Before
   public void init() {
-    ShieldedMerkleDiag.bindTestContext(chainBaseManager, snapshotManager);
     previousAllowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
         .getAllowShieldedTransaction();
     if (init) {
       return;
-    }
-    if (!"stopped".equals(System.getProperty("shielded.diag.mode"))) {
-      consensusService.start();
     }
     chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(10_000_000_000L);
     init = true;
@@ -270,27 +258,27 @@ public class ShieldedReceiveTest extends BaseTest {
   }
 
   @Test
-  public void testIsMining() throws Exception {
-    boolean stoppedMode = "stopped".equals(System.getProperty("shielded.diag.mode"));
-    if (!stoppedMode) {
-      Assert.assertTrue(wallet.isMining());
-      return;
-    }
-
-    // Lifecycle-only compatibility check. Excluded from anchor-race interpretation.
-    consensusService.start();
-    try {
-      Assert.assertTrue(wallet.isMining());
-    } finally {
-      consensusService.stop();
-      setDposTaskRunning(true);
-    }
+  public void testIsMining() {
+    initializeActiveWitnessSchedule();
+    Assert.assertTrue(wallet.isMining());
   }
 
-  private void setDposTaskRunning(boolean running) throws Exception {
-    Field isRunning = DposTask.class.getDeclaredField("isRunning");
-    isRunning.setAccessible(true);
-    isRunning.set(dposTask, running);
+  private void initializeActiveWitnessSchedule() {
+    synchronized (ShieldedReceiveTest.class) {
+      if (consensusScheduleInitialized) {
+        return;
+      }
+      boolean started = false;
+      try {
+        consensusService.start();
+        started = true;
+      } finally {
+        if (started) {
+          consensusService.stop();
+        }
+      }
+      consensusScheduleInitialized = true;
+    }
   }
 
   /*
@@ -2443,147 +2431,134 @@ public class ShieldedReceiveTest extends BaseTest {
     assert ecKey != null;
     byte[] witnessAddress = ecKey.getAddress();
     WitnessCapsule witnessCapsule = new WitnessCapsule(ByteString.copyFrom(witnessAddress));
-    // Stop the consensus task before modifying the witness schedule: DposTask uses the same
-    // localwitness key and would otherwise race to produce blocks at the same slot,
-    // triggering fork resolution and making the test slow.
-    boolean stoppedMode = "stopped".equals(System.getProperty("shielded.diag.mode"));
-    if (!stoppedMode) {
-      consensusService.stop();
+    // Initialize the same schedule as DPoS startup without starting its producer thread.
+    // Manual block production below therefore cannot race the background producer.
+    initializeActiveWitnessSchedule();
+    chainBaseManager.addWitness(ByteString.copyFrom(witnessAddress));
+
+    long time = nextScheduledTime(witnessCapsule.getAddress());
+    Block block = getSignedBlock(witnessCapsule.getAddress(), time, privateKey);
+    dbManager.pushBlock(new BlockCapsule(block));
+
+    //create transactions
+    chainBaseManager.getDynamicPropertiesStore().saveAllowShieldedTransaction(1);
+    chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(1000 * 1000000L);
+    ZenTransactionBuilder builder = new ZenTransactionBuilder(wallet);
+
+    // generate spend proof
+    SpendingKey sk = SpendingKey
+        .decode("ff2c06269315333a9207f817d2eca0ac555ca8f90196976324c7756504e7c9ee");
+    ExpandedSpendingKey expsk = sk.expandedSpendingKey();
+    byte[] senderOvk = expsk.getOvk();
+    PaymentAddress address = sk.defaultAddress();
+    Note note = new Note(address, 1000 * 1000000L);
+    IncrementalMerkleVoucherContainer voucher = createSimpleMerkleVoucherContainer(note.cm());
+    byte[] anchor = voucher.root().getContent().toByteArray();
+    chainBaseManager.getMerkleContainer()
+        .putMerkleTreeIntoStore(anchor, voucher.getVoucherCapsule().getTree());
+    builder.addSpend(expsk, note, anchor, voucher);
+
+    // generate output proof
+    SpendingKey sk2 = SpendingKey.random();
+    FullViewingKey fullViewingKey = sk2.fullViewingKey();
+    IncomingViewingKey incomingViewingKey = fullViewingKey.inViewingKey();
+
+    byte[] memo = org.tron.keystore.Wallet.generateRandomBytes(512);
+
+    //send coin to 2 different address generated by same sk
+    DiversifierT d1 = DiversifierT.random();
+    PaymentAddress paymentAddress1 = incomingViewingKey.address(d1).get();
+    builder.addOutput(senderOvk, paymentAddress1,
+        (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2, memo);
+
+    DiversifierT d2 = DiversifierT.random();
+    PaymentAddress paymentAddress2 = incomingViewingKey.address(d2).get();
+    builder.addOutput(senderOvk, paymentAddress2,
+        (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2, memo);
+
+    TransactionCapsule transactionCap = builder.build();
+
+    byte[] trxId = transactionCap.getTransactionId().getBytes();
+    boolean ok = dbManager.pushTransaction(transactionCap);
+    Assert.assertTrue(ok);
+
+    Thread.sleep(500);
+    //package transaction to block
+    long expectedBlockNum = chainBaseManager.getDynamicPropertiesStore()
+        .getLatestBlockHeaderNumber() + 1;
+    block = getSignedBlock(witnessCapsule.getAddress(),
+        nextScheduledTime(witnessCapsule.getAddress()), privateKey);
+    dbManager.pushBlock(new BlockCapsule(block));
+
+    BlockCapsule blockCapsule3 = new BlockCapsule(wallet.getNowBlock());
+    Assert.assertEquals("unexpected block number", expectedBlockNum, blockCapsule3.getNum());
+
+    block = getSignedBlock(witnessCapsule.getAddress(),
+        nextScheduledTime(witnessCapsule.getAddress()), privateKey);
+    dbManager.pushBlock(new BlockCapsule(block));
+
+    // scan note by ivk
+    byte[] receiverIvk = incomingViewingKey.getValue();
+    DecryptNotes notes1 = wallet.scanNoteByIvk(0, 100, receiverIvk);
+    Assert.assertEquals(2, notes1.getNoteTxsCount());
+
+    // scan note by ivk and mark
+    DecryptNotesMarked notes3 = wallet.scanAndMarkNoteByIvk(0, 100, receiverIvk,
+        fullViewingKey.getAk(), fullViewingKey.getNk());
+    Assert.assertEquals(2, notes3.getNoteTxsCount());
+
+    // scan note by ovk
+    DecryptNotes notes2 = wallet.scanNoteByOvk(0, 100, senderOvk);
+    Assert.assertEquals(2, notes2.getNoteTxsCount());
+
+    // to spend received note above.
+    ZenTransactionBuilder builder2 = new ZenTransactionBuilder(wallet);
+
+    //query merkleinfo
+    OutputPointInfo.Builder request = OutputPointInfo.newBuilder();
+    for (int i = 0; i < notes1.getNoteTxsCount(); i++) {
+      OutputPoint.Builder outPointBuild = OutputPoint.newBuilder();
+      outPointBuild.setHash(ByteString.copyFrom(trxId));
+      outPointBuild.setIndex(i);
+      request.addOutPoints(outPointBuild.build());
     }
-    try {
-      chainBaseManager.addWitness(ByteString.copyFrom(witnessAddress));
+    request.setBlockNum(1);
+    IncrementalMerkleVoucherInfo merkleVoucherInfo = wallet
+        .getMerkleTreeVoucherInfo(request.build());
 
-      long time = nextScheduledTime(witnessCapsule.getAddress());
-      Block block = getSignedBlock(witnessCapsule.getAddress(), time, privateKey);
-      dbManager.pushBlock(new BlockCapsule(block));
+    //build spend proof. allow only one note in spend
+    ExpandedSpendingKey expsk2 = sk2.expandedSpendingKey();
+    for (int i = 0; i < 1; i++) {
+      org.tron.api.GrpcAPI.Note grpcNote = notes1.getNoteTxs(i).getNote();
+      PaymentAddress paymentAddress = KeyIo.decodePaymentAddress(grpcNote.getPaymentAddress());
+      Note note2 = new Note(paymentAddress.getD(),
+          paymentAddress.getPkD(),
+          grpcNote.getValue(),
+          grpcNote.getRcm().toByteArray()
+      );
 
-      //create transactions
-      chainBaseManager.getDynamicPropertiesStore().saveAllowShieldedTransaction(1);
-      chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(1000 * 1000000L);
-      ZenTransactionBuilder builder = new ZenTransactionBuilder(wallet);
-
-      // generate spend proof
-      SpendingKey sk = SpendingKey
-          .decode("ff2c06269315333a9207f817d2eca0ac555ca8f90196976324c7756504e7c9ee");
-      ExpandedSpendingKey expsk = sk.expandedSpendingKey();
-      byte[] senderOvk = expsk.getOvk();
-      PaymentAddress address = sk.defaultAddress();
-      Note note = new Note(address, 1000 * 1000000L);
-      IncrementalMerkleVoucherContainer voucher = createSimpleMerkleVoucherContainer(note.cm());
-      byte[] anchor = voucher.root().getContent().toByteArray();
-      chainBaseManager.getMerkleContainer()
-          .putMerkleTreeIntoStore(anchor, voucher.getVoucherCapsule().getTree());
-      builder.addSpend(expsk, note, anchor, voucher);
-
-      // generate output proof
-      SpendingKey sk2 = SpendingKey.random();
-      FullViewingKey fullViewingKey = sk2.fullViewingKey();
-      IncomingViewingKey incomingViewingKey = fullViewingKey.inViewingKey();
-
-      byte[] memo = org.tron.keystore.Wallet.generateRandomBytes(512);
-
-      //send coin to 2 different address generated by same sk
-      DiversifierT d1 = DiversifierT.random();
-      PaymentAddress paymentAddress1 = incomingViewingKey.address(d1).get();
-      builder.addOutput(senderOvk, paymentAddress1,
-          (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2, memo);
-
-      DiversifierT d2 = DiversifierT.random();
-      PaymentAddress paymentAddress2 = incomingViewingKey.address(d2).get();
-      builder.addOutput(senderOvk, paymentAddress2,
-          (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2, memo);
-
-      TransactionCapsule transactionCap = builder.build();
-
-      byte[] trxId = transactionCap.getTransactionId().getBytes();
-      boolean ok = dbManager.pushTransaction(transactionCap);
-      Assert.assertTrue(ok);
-
-      Thread.sleep(500);
-      //package transaction to block
-      long expectedBlockNum = chainBaseManager.getDynamicPropertiesStore()
-          .getLatestBlockHeaderNumber() + 1;
-      block = getSignedBlock(witnessCapsule.getAddress(),
-          nextScheduledTime(witnessCapsule.getAddress()), privateKey);
-      dbManager.pushBlock(new BlockCapsule(block));
-
-      BlockCapsule blockCapsule3 = new BlockCapsule(wallet.getNowBlock());
-      Assert.assertEquals("unexpected block number", expectedBlockNum, blockCapsule3.getNum());
-
-      block = getSignedBlock(witnessCapsule.getAddress(),
-          nextScheduledTime(witnessCapsule.getAddress()), privateKey);
-      dbManager.pushBlock(new BlockCapsule(block));
-
-      // scan note by ivk
-      byte[] receiverIvk = incomingViewingKey.getValue();
-      DecryptNotes notes1 = wallet.scanNoteByIvk(0, 100, receiverIvk);
-      Assert.assertEquals(2, notes1.getNoteTxsCount());
-
-      // scan note by ivk and mark
-      DecryptNotesMarked notes3 = wallet.scanAndMarkNoteByIvk(0, 100, receiverIvk,
-          fullViewingKey.getAk(), fullViewingKey.getNk());
-      Assert.assertEquals(2, notes3.getNoteTxsCount());
-
-      // scan note by ovk
-      DecryptNotes notes2 = wallet.scanNoteByOvk(0, 100, senderOvk);
-      Assert.assertEquals(2, notes2.getNoteTxsCount());
-
-      // to spend received note above.
-      ZenTransactionBuilder builder2 = new ZenTransactionBuilder(wallet);
-
-      //query merkleinfo
-      OutputPointInfo.Builder request = OutputPointInfo.newBuilder();
-      for (int i = 0; i < notes1.getNoteTxsCount(); i++) {
-        OutputPoint.Builder outPointBuild = OutputPoint.newBuilder();
-        outPointBuild.setHash(ByteString.copyFrom(trxId));
-        outPointBuild.setIndex(i);
-        request.addOutPoints(outPointBuild.build());
-      }
-      request.setBlockNum(1);
-      IncrementalMerkleVoucherInfo merkleVoucherInfo = wallet
-          .getMerkleTreeVoucherInfo(request.build());
-
-      //build spend proof. allow only one note in spend
-      ExpandedSpendingKey expsk2 = sk2.expandedSpendingKey();
-      for (int i = 0; i < 1; i++) {
-        org.tron.api.GrpcAPI.Note grpcNote = notes1.getNoteTxs(i).getNote();
-        PaymentAddress paymentAddress = KeyIo.decodePaymentAddress(grpcNote.getPaymentAddress());
-        Note note2 = new Note(paymentAddress.getD(),
-            paymentAddress.getPkD(),
-            grpcNote.getValue(),
-            grpcNote.getRcm().toByteArray()
-        );
-
-        IncrementalMerkleVoucherContainer voucher2 =
-            new IncrementalMerkleVoucherContainer(
-                new IncrementalMerkleVoucherCapsule(merkleVoucherInfo.getVouchers(i)));
-        byte[] anchor2 = voucher2.root().getContent().toByteArray();
-        builder2.addSpend(expsk2, note2, anchor2, voucher2);
-      }
-
-      //build output proof
-      SpendingKey sk3 = SpendingKey.random();
-      FullViewingKey fvk3 = sk3.fullViewingKey();
-      IncomingViewingKey ivk3 = fvk3.inViewingKey();
-
-      DiversifierT d3 = DiversifierT.random();
-      PaymentAddress paymentAddress3 = incomingViewingKey.address(d3).get();
-      byte[] memo3 = org.tron.keystore.Wallet.generateRandomBytes(512);
-      builder2.addOutput(expsk2.getOvk(), paymentAddress3,
-          (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2 - wallet
-              .getShieldedTransactionFee(), memo3);
-
-      TransactionCapsule transactionCap2 = builder2.build();
-      boolean ok2 = dbManager.pushTransaction(transactionCap2);
-      Assert.assertTrue(ok2);
-    } finally {
-      // DposTask.init() does not reset isRunning (it stays false after stop()), so force it back
-      // to true via reflection before restarting.
-      if (!stoppedMode) {
-        setDposTaskRunning(true);
-        consensusService.start();
-      }
+      IncrementalMerkleVoucherContainer voucher2 =
+          new IncrementalMerkleVoucherContainer(
+              new IncrementalMerkleVoucherCapsule(merkleVoucherInfo.getVouchers(i)));
+      byte[] anchor2 = voucher2.root().getContent().toByteArray();
+      builder2.addSpend(expsk2, note2, anchor2, voucher2);
     }
+
+    //build output proof
+    SpendingKey sk3 = SpendingKey.random();
+    FullViewingKey fvk3 = sk3.fullViewingKey();
+    IncomingViewingKey ivk3 = fvk3.inViewingKey();
+
+    DiversifierT d3 = DiversifierT.random();
+    PaymentAddress paymentAddress3 = incomingViewingKey.address(d3).get();
+    byte[] memo3 = org.tron.keystore.Wallet.generateRandomBytes(512);
+    builder2.addOutput(expsk2.getOvk(), paymentAddress3,
+        (1000 * 1000000L - wallet.getShieldedTransactionFee()) / 2 - wallet
+            .getShieldedTransactionFee(), memo3);
+
+    TransactionCapsule transactionCap2 = builder2.build();
+    boolean ok2 = dbManager.pushTransaction(transactionCap2);
+    Assert.assertTrue(ok2);
   }
 
   // Returns the earliest timestamp at which witnessAddr is the DPoS-scheduled producer,

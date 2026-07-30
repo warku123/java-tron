@@ -235,8 +235,7 @@ public class ShieldedTransferActuator extends AbstractActuator {
           throw new ContractValidateException("duplicate sapling nullifiers in this transaction");
         }
         nfSet.add(spendDescription.getNullifier());
-        if (!org.tron.common.zksnark.ShieldedMerkleDiag.anchorLookup("E-validate-anchor",
-            spendDescription.getAnchor().toByteArray(), chainBaseManager, merkleContainer)) {
+        if (!merkleContainer.merkleRootExist(spendDescription.getAnchor().toByteArray())) {
           throw new ContractValidateException("Rt is invalid.");
         }
         if (nullifierStore.has(spendDescription.getNullifier().toByteArray())) {
