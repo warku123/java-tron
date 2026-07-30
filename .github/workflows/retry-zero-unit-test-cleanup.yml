@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   retry-zero-verifier:
-    name: Retry zero round ${{ matrix.round }} (JDK 8 / x86_64)
+    name: Shielded ${{ matrix.mode }} round ${{ matrix.round }} (JDK 8 / x86_64)
     if: >-
       github.event_name == 'pull_request'
       && github.head_ref == 'verify/retry-zero-unit-test-cleanup'
@@ -23,6 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         round: [1, 2, 3]
+        mode: [control, stopped]
 
     container:
       image: eclipse-temurin:8-jdk
@@ -33,6 +34,7 @@ jobs:
 
     env:
       GRADLE_USER_HOME: /github/home/.gradle
+      SHIELDED_MODE: ${{ matrix.mode }}
 
     steps:
       - name: Install dependencies
@@ -44,13 +46,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      - name: Trust checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Gradle clean build
         id: g_build
         continue-on-error: true
         run: |
           mkdir -p evidence
           set +e
-          ./gradlew clean build --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-build.log
+          ./gradlew clean build --no-daemon --no-build-cache --no-watch-fs --console=plain --stacktrace -Dshielded.diag.mode="$SHIELDED_MODE" --init-script .github/scripts/shielded_ci_ab.init.gradle 2>&1 | tee evidence/gradle-build.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
@@ -62,7 +67,7 @@ jobs:
         run: |
           mkdir -p evidence
           set +e
-          ./gradlew :framework:testWithRocksDb --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-testWithRocksDb.log
+          ./gradlew :framework:testWithRocksDb --no-daemon --no-build-cache --no-watch-fs --console=plain --stacktrace -Dshielded.diag.mode="$SHIELDED_MODE" --init-script .github/scripts/shielded_ci_ab.init.gradle 2>&1 | tee evidence/gradle-testWithRocksDb.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
@@ -74,7 +79,7 @@ jobs:
         run: |
           mkdir -p evidence
           set +e
-          ./gradlew jacocoTestReport --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-jacocoTestReport.log
+          ./gradlew jacocoTestReport --no-daemon --no-build-cache --no-watch-fs --console=plain --stacktrace -Dshielded.diag.mode="$SHIELDED_MODE" --init-script .github/scripts/shielded_ci_ab.init.gradle 2>&1 | tee evidence/gradle-jacocoTestReport.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
@@ -91,6 +96,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REF: ${{ github.head_ref || github.ref_name }}
           ROUND: ${{ matrix.round }}
+          MODE: ${{ matrix.mode }}
         run: |
           set -euo pipefail
           mkdir -p evidence
@@ -102,14 +108,14 @@ jobs:
           cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
           jq -n \
             --arg head_sha "$HEAD_SHA" --arg checkout_sha "$checkout_sha" \
-            --arg head_ref "$HEAD_REF" --arg round "$ROUND" \
+            --arg head_ref "$HEAD_REF" --arg round "$ROUND" --arg mode "$MODE" \
             --arg java "$java_version" --arg gradle "$gradle_version" \
             --arg cpu "$cpu_model" --arg cpu_count "$cpu_count" \
             --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg pr "$PR_NUMBER" --argjson build "$BUILD_EXIT" \
             --argjson rocksdb "$ROCKSDB_EXIT" --argjson jacoco "$JACOCO_EXIT" \
             '{head_sha:$head_sha,checkout_sha:$checkout_sha,head_ref:$head_ref,
-              round:$round,java:$java,gradle:$gradle,cpu:$cpu,cpu_count:$cpu_count,
+              round:$round,mode:$mode,java:$java,gradle:$gradle,cpu:$cpu,cpu_count:$cpu_count,
               run_id:$run_id,run_attempt:$run_attempt,pr_number:$pr,
               exit_codes:{build:$build,testWithRocksDb:$rocksdb,jacocoTestReport:$jacoco}}' \
             > evidence/metadata.json
@@ -139,7 +145,7 @@ jobs:
           report_count="$(jq -r '.jacoco.report_count // 0' evidence/summary.json)"
           suite_count="$(jq -r '.junit.suite_count // 0' evidence/summary.json)"
           {
-            echo "### Retry zero verifier — round ${{ matrix.round }}"
+            echo "### Shielded ${{ matrix.mode }} — round ${{ matrix.round }}"
             echo
             echo '| Command | Exit |'
             echo '|---|---:|'
@@ -157,7 +163,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: retry-zero-pr${{ steps.meta.outputs.pr_number }}-${{ steps.meta.outputs.head_slug }}-${{ steps.meta.outputs.short_sha }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}-round${{ matrix.round }}
+          name: shielded-${{ matrix.mode }}-pr${{ steps.meta.outputs.pr_number }}-${{ steps.meta.outputs.head_slug }}-${{ steps.meta.outputs.short_sha }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}-round${{ matrix.round }}
           retention-days: 30
           if-no-files-found: warn
           path: |

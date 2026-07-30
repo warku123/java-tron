@@ -1,0 +1,41 @@
+import org.gradle.api.tasks.testing.Test
+import org.gradle.testretry.TestRetryPlugin
+
+initscript {
+  repositories { gradlePluginPortal() }
+  dependencies { classpath 'org.gradle:test-retry-gradle-plugin:1.5.9' }
+}
+
+def mode = System.getProperty('shielded.diag.mode', 'control')
+if (!(mode in ['control', 'stopped'])) {
+  throw new GradleException("shielded.diag.mode must be control or stopped, got ${mode}")
+}
+
+gradle.projectsLoaded {
+  rootProject.allprojects { project -> project.pluginManager.apply(TestRetryPlugin) }
+}
+
+gradle.projectsEvaluated {
+  allprojects { project ->
+    project.tasks.withType(Test).configureEach { Test task ->
+      def retryExtension = task.extensions.findByName('retry')
+      if (retryExtension == null) {
+        throw new GradleException("Missing test-retry extension on ${task.path}")
+      }
+      retryExtension.maxRetries = 0
+      retryExtension.maxFailures = 1
+      task.systemProperty('shielded.diag.mode', mode)
+      task.systemProperty('shielded.diag.dir',
+          new File(rootProject.projectDir, 'evidence/shielded-merkle-diag').absolutePath)
+      task.doFirst {
+        retryExtension.maxRetries = 0
+        retryExtension.maxFailures = 1
+        println "SHIELDED_CI_AB mode=${mode} task=${task.path} " +
+            "maxRetries=${retryExtension.maxRetries.get()} " +
+            "maxFailures=${retryExtension.maxFailures.get()} " +
+            "maxParallelForks=${task.maxParallelForks} forkEvery=${task.forkEvery} " +
+            "diagDir=${task.systemProperties['shielded.diag.dir']}"
+      }
+    }
+  }
+}

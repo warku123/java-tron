@@ -47,6 +47,7 @@ import org.tron.common.zksnark.LibrustzcashParam.CheckSpendParams;
 import org.tron.common.zksnark.LibrustzcashParam.IvkToPkdParams;
 import org.tron.common.zksnark.LibrustzcashParam.OutputProofParams;
 import org.tron.common.zksnark.LibrustzcashParam.SpendSigParams;
+import org.tron.common.zksnark.ShieldedMerkleDiag;
 import org.tron.consensus.dpos.DposSlot;
 import org.tron.consensus.dpos.DposTask;
 import org.tron.core.Wallet;
@@ -80,6 +81,7 @@ import org.tron.core.exception.TransactionExpirationException;
 import org.tron.core.exception.VMIllegalException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.exception.ZksnarkException;
+import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.utils.TransactionUtil;
 import org.tron.core.zen.ZenTransactionBuilder;
 import org.tron.core.zen.ZenTransactionBuilder.ReceiveDescriptionInfo;
@@ -150,6 +152,8 @@ public class ShieldedReceiveTest extends BaseTest {
   private Wallet wallet;
   @Resource
   private DposSlot dposSlot;
+  @Resource
+  private SnapshotManager snapshotManager;
 
   private static boolean init;
 
@@ -169,12 +173,15 @@ public class ShieldedReceiveTest extends BaseTest {
    */
   @Before
   public void init() {
+    ShieldedMerkleDiag.bindTestContext(chainBaseManager, snapshotManager);
     previousAllowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
         .getAllowShieldedTransaction();
     if (init) {
       return;
     }
-    consensusService.start();
+    if (!"stopped".equals(System.getProperty("shielded.diag.mode"))) {
+      consensusService.start();
+    }
     chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(10_000_000_000L);
     init = true;
   }
@@ -263,8 +270,27 @@ public class ShieldedReceiveTest extends BaseTest {
   }
 
   @Test
-  public void testIsMining() {
-    Assert.assertTrue(wallet.isMining());
+  public void testIsMining() throws Exception {
+    boolean stoppedMode = "stopped".equals(System.getProperty("shielded.diag.mode"));
+    if (!stoppedMode) {
+      Assert.assertTrue(wallet.isMining());
+      return;
+    }
+
+    // Lifecycle-only compatibility check. Excluded from anchor-race interpretation.
+    consensusService.start();
+    try {
+      Assert.assertTrue(wallet.isMining());
+    } finally {
+      consensusService.stop();
+      setDposTaskRunning(true);
+    }
+  }
+
+  private void setDposTaskRunning(boolean running) throws Exception {
+    Field isRunning = DposTask.class.getDeclaredField("isRunning");
+    isRunning.setAccessible(true);
+    isRunning.set(dposTask, running);
   }
 
   /*
@@ -2420,7 +2446,10 @@ public class ShieldedReceiveTest extends BaseTest {
     // Stop the consensus task before modifying the witness schedule: DposTask uses the same
     // localwitness key and would otherwise race to produce blocks at the same slot,
     // triggering fork resolution and making the test slow.
-    consensusService.stop();
+    boolean stoppedMode = "stopped".equals(System.getProperty("shielded.diag.mode"));
+    if (!stoppedMode) {
+      consensusService.stop();
+    }
     try {
       chainBaseManager.addWitness(ByteString.copyFrom(witnessAddress));
 
@@ -2550,10 +2579,10 @@ public class ShieldedReceiveTest extends BaseTest {
     } finally {
       // DposTask.init() does not reset isRunning (it stays false after stop()), so force it back
       // to true via reflection before restarting.
-      Field isRunning = DposTask.class.getDeclaredField("isRunning");
-      isRunning.setAccessible(true);
-      isRunning.set(dposTask, true);
-      consensusService.start();
+      if (!stoppedMode) {
+        setDposTaskRunning(true);
+        consensusService.start();
+      }
     }
   }
 
