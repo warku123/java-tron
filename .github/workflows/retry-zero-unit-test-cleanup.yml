@@ -1,0 +1,184 @@
+name: Retry Zero Unit Test Cleanup Verifier
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retry-zero-verifier:
+    name: Retry zero round ${{ matrix.round }} (JDK 8 / x86_64)
+    if: >-
+      github.event_name == 'pull_request'
+      && github.head_ref == 'verify/retry-zero-unit-test-cleanup'
+      || github.event_name == 'workflow_dispatch'
+      && github.ref_name == 'verify/retry-zero-unit-test-cleanup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        round: [1, 2, 3]
+
+    container:
+      image: eclipse-temurin:8-jdk
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      GRADLE_USER_HOME: /github/home/.gradle
+
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          apt-get update
+          apt-get install -y git wget unzip build-essential curl jq python3
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Gradle clean build
+        id: g_build
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew clean build --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Gradle testWithRocksDb
+        id: g_rocksdb
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew :framework:testWithRocksDb --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-testWithRocksDb.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Gradle jacocoTestReport
+        id: g_jacoco
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          set +e
+          ./gradlew jacocoTestReport --no-daemon --no-build-cache --console=plain --stacktrace --init-script .github/scripts/retry_zero.init.gradle 2>&1 | tee evidence/gradle-jacocoTestReport.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Write metadata
+        id: meta
+        if: always()
+        env:
+          BUILD_EXIT: ${{ steps.g_build.outputs.exit || '-1' }}
+          ROCKSDB_EXIT: ${{ steps.g_rocksdb.outputs.exit || '-1' }}
+          JACOCO_EXIT: ${{ steps.g_jacoco.outputs.exit || '-1' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 'manual' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          ROUND: ${{ matrix.round }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          checkout_sha="$(git rev-parse HEAD)"
+          head_slug="$(printf '%s' "$HEAD_REF" | tr '/ :' '---' | tr -cd '[:alnum:]_.-')"
+          java_version="$(java -version 2>&1 | tr '\n' ' ')"
+          gradle_version="$(./gradlew --version --no-daemon | tr '\n' ' ')"
+          cpu_model="$(lscpu 2>/dev/null | tr '\n' ';' || true)"
+          cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+          jq -n \
+            --arg head_sha "$HEAD_SHA" --arg checkout_sha "$checkout_sha" \
+            --arg head_ref "$HEAD_REF" --arg round "$ROUND" \
+            --arg java "$java_version" --arg gradle "$gradle_version" \
+            --arg cpu "$cpu_model" --arg cpu_count "$cpu_count" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg pr "$PR_NUMBER" --argjson build "$BUILD_EXIT" \
+            --argjson rocksdb "$ROCKSDB_EXIT" --argjson jacoco "$JACOCO_EXIT" \
+            '{head_sha:$head_sha,checkout_sha:$checkout_sha,head_ref:$head_ref,
+              round:$round,java:$java,gradle:$gradle,cpu:$cpu,cpu_count:$cpu_count,
+              run_id:$run_id,run_attempt:$run_attempt,pr_number:$pr,
+              exit_codes:{build:$build,testWithRocksDb:$rocksdb,jacocoTestReport:$jacoco}}' \
+            > evidence/metadata.json
+          echo "head_slug=$head_slug" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${HEAD_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Generate manifest and summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/jacoco_baseline_summary.py \
+            --root . \
+            --output evidence/summary.json \
+            --manifest evidence/manifest.json \
+            --gradle-log-glob 'evidence/gradle-*.log'
+
+      - name: Write step summary
+        if: always()
+        env:
+          BUILD_EXIT: ${{ steps.g_build.outputs.exit || '-1' }}
+          ROCKSDB_EXIT: ${{ steps.g_rocksdb.outputs.exit || '-1' }}
+          JACOCO_EXIT: ${{ steps.g_jacoco.outputs.exit || '-1' }}
+        run: |
+          set -euo pipefail
+          exec_count="$(jq -r '.jacoco.exec_count // 0' evidence/summary.json)"
+          report_count="$(jq -r '.jacoco.report_count // 0' evidence/summary.json)"
+          suite_count="$(jq -r '.junit.suite_count // 0' evidence/summary.json)"
+          {
+            echo "### Retry zero verifier — round ${{ matrix.round }}"
+            echo
+            echo '| Command | Exit |'
+            echo '|---|---:|'
+            echo "| clean build | $BUILD_EXIT |"
+            echo "| testWithRocksDb | $ROCKSDB_EXIT |"
+            echo "| jacocoTestReport | $JACOCO_EXIT |"
+            echo
+            echo "- JaCoCo exec files: $exec_count"
+            echo "- JaCoCo XML reports: $report_count"
+            echo "- JUnit suites: $suite_count"
+            echo '- Evidence index: `evidence/summary.json`, `evidence/manifest.json`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: retry-zero-pr${{ steps.meta.outputs.pr_number }}-${{ steps.meta.outputs.head_slug }}-${{ steps.meta.outputs.short_sha }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}-round${{ matrix.round }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            evidence/
+            **/build/jacoco/**/*.exec
+            **/build/reports/jacoco/**/*.xml
+            **/build/test-results/**
+            **/build/reports/tests/**
+            **/hs_err_*.log
+            **/replay_*.txt
+            **/*.hprof
+
+      - name: Fail on Gradle error
+        if: always()
+        env:
+          BUILD_EXIT: ${{ steps.g_build.outputs.exit || '-1' }}
+          ROCKSDB_EXIT: ${{ steps.g_rocksdb.outputs.exit || '-1' }}
+          JACOCO_EXIT: ${{ steps.g_jacoco.outputs.exit || '-1' }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_EXIT" != 0 ] || [ "$ROCKSDB_EXIT" != 0 ] || [ "$JACOCO_EXIT" != 0 ]; then
+            echo "Gradle exit codes: build=$BUILD_EXIT testWithRocksDb=$ROCKSDB_EXIT jacocoTestReport=$JACOCO_EXIT"
+            exit 1
+          fi

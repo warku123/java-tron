@@ -1,0 +1,56 @@
+import org.gradle.api.tasks.testing.Test
+import org.gradle.testretry.TestRetryPlugin
+
+initscript {
+    repositories {
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'org.gradle:test-retry-gradle-plugin:1.5.9'
+    }
+}
+
+/*
+ * Disable test-retry without changing the repository's test process model.
+ * This runs after every project has been evaluated, so repository defaults
+ * for maxParallelForks and forkEvery remain authoritative.
+ */
+gradle.projectsLoaded {
+    rootProject.allprojects { project ->
+        project.pluginManager.apply(TestRetryPlugin)
+    }
+}
+
+gradle.projectsEvaluated {
+    allprojects { project ->
+        project.tasks.withType(Test).configureEach { Test task ->
+            def retryExtension = task.extensions.findByName('retry')
+            if (retryExtension == null) {
+                throw new GradleException("Missing test-retry extension on ${task.path}")
+            }
+
+            retryExtension.maxRetries = 0
+            retryExtension.maxFailures = 1
+
+            // Add a doFirst action, then place it immediately before Test's
+            // execution action. Earlier repository doFirst actions (including
+            // forkEvery setup) therefore run before this final override/marker.
+            task.doFirst {
+                retryExtension.maxRetries = 0
+                retryExtension.maxFailures = 1
+                println "RETRY_ZERO_FINAL task=${task.path} maxRetries=${retryExtension.maxRetries.get()} maxFailures=${retryExtension.maxFailures.get()} maxParallelForks=${task.maxParallelForks} forkEvery=${task.forkEvery}"
+            }
+            def markerAction = task.actions.remove(0)
+            def testActionIndex = task.actions.findIndexOf { action ->
+                action.class.name.contains('ExecuteActionsTaskExecuter') ||
+                    action.toString().contains('executeTests')
+            }
+            if (testActionIndex < 0) {
+                // test-retry's finalizer is last; its conditional test action
+                // immediately precedes that finalizer.
+                testActionIndex = Math.max(0, task.actions.size() - 2)
+            }
+            task.actions.add(testActionIndex, markerAction)
+        }
+    }
+}
