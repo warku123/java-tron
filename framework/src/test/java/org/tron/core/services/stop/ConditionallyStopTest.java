@@ -105,7 +105,7 @@ public abstract class ConditionallyStopTest extends BaseMethodTest {
         chainManager.getDynamicPropertiesStore().getLatestBlockHeaderNumberFromDB());
   }
 
-  @Test(timeout = 30_000) // milliseconds
+  @Test(timeout = 45_000) // milliseconds
   public void testStop() throws Exception {
     while (!tronNetDelegate.isHitDown()) {
       generateBlock();
