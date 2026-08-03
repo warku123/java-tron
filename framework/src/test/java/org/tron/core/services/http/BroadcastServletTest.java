@@ -40,6 +40,7 @@ public class BroadcastServletTest {
   private HttpURLConnection httpUrlConnection;
   private OutputStreamWriter outputStreamWriter;
   private URL url;
+  private PrintStream originalOut;
 
   /**
    * init before class.
@@ -66,6 +67,7 @@ public class BroadcastServletTest {
    */
   @Before
   public void setUp() {
+    originalOut = System.out;
     broadcastServlet = new BroadcastServlet();
     this.request = mock(HttpServletRequest.class);
     this.response = mock(HttpServletResponse.class);
@@ -79,6 +81,7 @@ public class BroadcastServletTest {
    */
   @After
   public void tearDown() {
+    System.setOut(originalOut);
     if (FileUtil.deleteDir(new File("temp.txt"))) {
       logger.info("Release resources successful.");
     } else {

@@ -41,6 +41,7 @@ public class GetTransactionByIdSolidityServletTest {
   private HttpURLConnection httpUrlConnection;
   private OutputStreamWriter outputStreamWriter;
   private URL url;
+  private PrintStream originalOut;
 
   /**
    * .
@@ -65,6 +66,7 @@ public class GetTransactionByIdSolidityServletTest {
 
   @Before
   public void setUp() {
+    originalOut = System.out;
     getTransactionByIdSolidityServlet = new GetTransactionByIdSolidityServlet();
     this.request = mock(HttpServletRequest.class);
     this.response = mock(HttpServletResponse.class);
@@ -78,6 +80,7 @@ public class GetTransactionByIdSolidityServletTest {
    */
   @After
   public void tearDown() {
+    System.setOut(originalOut);
     if (FileUtil.deleteDir(new File("temp.txt"))) {
       logger.info("Release resources successful.");
     } else {
