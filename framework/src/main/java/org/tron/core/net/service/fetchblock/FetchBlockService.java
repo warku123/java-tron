@@ -16,8 +16,6 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.message.adv.FetchInvDataMessage;
 import org.tron.core.net.peer.Item;
@@ -97,9 +95,9 @@ public class FetchBlockService {
         .filter(PeerConnection::isIdle)
         .filter(filterPeer -> !filterPeer.equals(fetchBlock.getPeer()))
         .filter(filterPeer -> filterPeer.getAdvInvReceive().getIfPresent(item) != null)
-        .filter(filterPeer -> getPeerTop75(filterPeer)
+        .filter(filterPeer -> getPeerLatency(filterPeer)
             <= CommonParameter.getInstance().fetchBlockTimeout)
-        .min(Comparator.comparingDouble(this::getPeerTop75));
+        .min(Comparator.comparingDouble(this::getPeerLatency));
 
     if (optionalPeerConnection.isPresent()) {
       optionalPeerConnection.ifPresent(firstPeer -> {
@@ -120,21 +118,20 @@ public class FetchBlockService {
   }
 
   private boolean shouldFetchBlock(PeerConnection newPeer, FetchBlockInfo fetchBlock) {
-    double newPeerTop75 = getPeerTop75(newPeer);
-    double oldPeerTop75 = getPeerTop75(fetchBlock.getPeer());
+    double newPeerLatency = getPeerLatency(newPeer);
+    double oldPeerLatency = getPeerLatency(fetchBlock.getPeer());
     long oldPeerSpendTime = System.currentTimeMillis() - fetchBlock.getTime();
-    if (oldPeerTop75 > fetchTimeOut || oldPeerSpendTime >= fetchTimeOut) {
+    if (oldPeerLatency > fetchTimeOut || oldPeerSpendTime >= fetchTimeOut) {
       return true;
     }
 
-    double oldPeerLeftTime = oldPeerTop75 - oldPeerSpendTime;
-    return newPeerTop75 < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
-        && oldPeerSpendTime + newPeerTop75 < fetchTimeOut;
+    double oldPeerLeftTime = oldPeerLatency - oldPeerSpendTime;
+    return newPeerLatency < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
+        && oldPeerSpendTime + newPeerLatency < fetchTimeOut;
   }
 
-  private double getPeerTop75(PeerConnection peerConnection) {
-    return MetricsUtil.getHistogram(MetricsKey.NET_LATENCY_FETCH_BLOCK
-        + peerConnection.getInetAddress()).getSnapshot().get75thPercentile();
+  private double getPeerLatency(PeerConnection peerConnection) {
+    return peerConnection.getChannel().getAvgLatency();
   }
 
   private static class FetchBlockInfo {
