@@ -21,13 +21,13 @@ import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.PublicMethod;
 import org.tron.common.utils.Sha256Hash;
-import org.tron.common.utils.StringUtil;
-import org.tron.common.utils.Utils;
+import org.tron.common.utils.StringUtil;import org.tron.common.utils.Utils;
 import org.tron.consensus.dpos.DposSlot;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
@@ -36,6 +36,7 @@ import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ConsensusService;
 import org.tron.core.net.TronNetDelegate;
+import org.tron.program.Version;
 import org.tron.protos.Protocol;
 
 @Slf4j(topic = "metric")
@@ -204,6 +205,30 @@ public class PrometheusApiServiceTest extends BaseTest {
     blockCapsule.setMerkleRoot();
     blockCapsule.sign(ByteArray.fromHexString(witnessAddressMap.get(witnessAddress)));
     return blockCapsule;
+  }
+
+  @Test
+  public void testNodeInfoMetric() {
+    String version = Version.getVersion();
+    Metrics.info(MetricKeys.Info.NODE_INFO, version);
+    // Prometheus Info collector appends "_info" to the sample name
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:node_info_info",
+        new String[] {MetricLabels.Info.VERSION},
+        new String[] {version});
+    Assert.assertNotNull("tron:node_info_info sample should exist", value);
+    Assert.assertEquals(1.0, value, 0.0);
+  }
+
+  @Test
+  public void testNodeInfoUnknownKey() {
+    // unknown key exercises the null-guard branch in MetricsInfo.set
+    Metrics.info("tron:unknown_info", "x");
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:unknown_info_info",
+        new String[] {"version"},
+        new String[] {"x"});
+    Assert.assertNull(value);
   }
 
 }
