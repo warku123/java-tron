@@ -68,7 +68,6 @@ import org.tron.api.GrpcAPI.TransactionListExtention;
 import org.tron.api.GrpcAPI.TransactionSignWeight;
 import org.tron.api.GrpcAPI.ViewingKeyMessage;
 import org.tron.api.GrpcAPI.WitnessList;
-import org.tron.api.MonitorGrpc;
 import org.tron.api.WalletExtensionGrpc;
 import org.tron.api.WalletGrpc.WalletImplBase;
 import org.tron.api.WalletSolidityGrpc.WalletSolidityImplBase;
@@ -94,7 +93,6 @@ import org.tron.core.exception.NonUniqueObjectException;
 import org.tron.core.exception.StoreException;
 import org.tron.core.exception.VMIllegalException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.metrics.MetricsApiService;
 import org.tron.core.services.http.Util;
 import org.tron.core.utils.TransactionUtil;
 import org.tron.core.zen.address.DiversifierT;
@@ -177,15 +175,11 @@ public class RpcApiService extends RpcService {
   private TransactionUtil transactionUtil;
   @Autowired
   private NodeInfoService nodeInfoService;
-  @Autowired
-  private MetricsApiService metricsApiService;
   @Getter
   private DatabaseApi databaseApi = new DatabaseApi();
   private WalletApi walletApi = new WalletApi();
   @Getter
   private WalletSolidityApi walletSolidityApi = new WalletSolidityApi();
-  @Getter
-  private MonitorApi monitorApi = new MonitorApi();
 
   public RpcApiService() {
     port = Args.getInstance().getRpcPort();
@@ -204,10 +198,6 @@ public class RpcApiService extends RpcService {
       }
     } else {
       serverBuilder.addService(walletApi);
-    }
-
-    if (parameter.isNodeMetricsEnable()) {
-      serverBuilder.addService(monitorApi);
     }
   }
 
@@ -2650,16 +2640,6 @@ public class RpcApiService extends RpcService {
     public void getBlock(GrpcAPI.BlockReq  request,
         StreamObserver<BlockExtention> responseObserver) {
       getBlockCommon(request, responseObserver);
-    }
-  }
-
-  public class MonitorApi extends MonitorGrpc.MonitorImplBase {
-
-    @Override
-    public void getStatsInfo(EmptyMessage request,
-        StreamObserver<Protocol.MetricsInfo> responseObserver) {
-      responseObserver.onNext(metricsApiService.getMetricProtoInfo());
-      responseObserver.onCompleted();
     }
   }
 

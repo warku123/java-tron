@@ -34,8 +34,6 @@ import org.tron.core.Constant;
 import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.config.Parameter.NetConstants;
 import org.tron.core.config.args.Args;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.P2pRateLimiter;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.message.adv.InventoryMessage;
@@ -304,8 +302,6 @@ public class PeerConnection {
         channel.close();
         break;
     }
-    MetricsUtil.counterInc(MetricsKey.NET_DISCONNECTION_COUNT);
-    MetricsUtil.counterInc(MetricsKey.NET_DISCONNECTION_DETAIL + reason);
     Metrics.counterInc(MetricKeys.Counter.P2P_DISCONNECT, 1,
             reason.name().toLowerCase(Locale.ROOT));
   }

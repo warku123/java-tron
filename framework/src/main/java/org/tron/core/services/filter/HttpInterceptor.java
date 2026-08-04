@@ -13,13 +13,10 @@ import org.eclipse.jetty.http.HttpStatus;
 import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 
 @Slf4j(topic = "httpInterceptor")
 public class HttpInterceptor implements Filter {
 
-  private final int HTTP_SUCCESS = 200;
   private final int HTTP_BAD_REQUEST = 400;
   private final int HTTP_NOT_ACCEPTABLE = 406;
 
@@ -42,31 +39,14 @@ public class HttpInterceptor implements Filter {
       chain.doFilter(request, responseWrapper);
       HttpServletResponse resp = (HttpServletResponse) response;
       int size = responseWrapper.getByteSize();
-      MetricsUtil.meterMark(MetricsKey.NET_API_OUT_TRAFFIC, size);
-      MetricsUtil.meterMark(MetricsKey.NET_API_QPS);
       if (resp.getStatus() >= HTTP_BAD_REQUEST && resp.getStatus() <= HTTP_NOT_ACCEPTABLE) {
-        MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
         Metrics.histogramObserve(MetricKeys.Histogram.HTTP_BYTES,
                 size, MetricLabels.UNDEFINED, String.valueOf(responseWrapper.getStatus()));
         return;
       }
-      if (resp.getStatus() == HTTP_SUCCESS) {
-        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_QPS + endpoint);
-      } else {
-        MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
-        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_FAIL_QPS + endpoint);
-      }
-      MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_OUT_TRAFFIC + endpoint, size);
       Metrics.histogramObserve(MetricKeys.Histogram.HTTP_BYTES,
               size, endpoint, String.valueOf(responseWrapper.getStatus()));
     } catch (Exception e) {
-      String key = MetricsKey.NET_API_DETAIL_QPS + endpoint;
-      if (MetricsUtil.getMeters(MetricsKey.NET_API_DETAIL_QPS).containsKey(key)) {
-        MetricsUtil.meterMark(key, 1);
-        MetricsUtil.meterMark(MetricsKey.NET_API_DETAIL_FAIL_QPS + endpoint, 1);
-      }
-      MetricsUtil.meterMark(MetricsKey.NET_API_QPS, 1);
-      MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS, 1);
       if (e instanceof BadMessageException
           && ((BadMessageException) e).getCode() == HttpStatus.PAYLOAD_TOO_LARGE_413) {
         throw (BadMessageException) e;
@@ -78,5 +58,3 @@ public class HttpInterceptor implements Filter {
   public void destroy() {
   }
 }
-
-

@@ -239,8 +239,6 @@ public class FullNodeHttpApiService extends HttpService {
   private GetTriggerInputForShieldedTRC20ContractServlet
       getTriggerInputForShieldedTRC20ContractServlet;
   @Autowired
-  private MetricsServlet metricsServlet;
-  @Autowired
   private MarketSellAssetServlet marketSellAssetServlet;
   @Autowired
   private MarketCancelOrderServlet marketCancelOrderServlet;
@@ -471,7 +469,6 @@ public class FullNodeHttpApiService extends HttpService {
         "/wallet/gettransactioninfobyblocknum");
     context.addServlet(new ServletHolder(listNodesServlet), "/net/listnodes");
 
-    context.addServlet(new ServletHolder(metricsServlet), "/monitor/getstatsinfo");
     context.addServlet(new ServletHolder(getNodeInfoServlet), "/monitor/getnodeinfo");
     context.addServlet(new ServletHolder(marketSellAssetServlet), "/wallet/marketsellasset");
     context.addServlet(new ServletHolder(marketCancelOrderServlet), "/wallet/marketcancelorder");
@@ -531,7 +528,6 @@ public class FullNodeHttpApiService extends HttpService {
     context.getServletHandler().getFilterMappings()[1]
         .setPathSpecs(new String[] {"/wallet/*",
             "/net/listnodes",
-            "/monitor/getstatsinfo",
             "/monitor/getnodeinfo"});
 
     // metrics filter

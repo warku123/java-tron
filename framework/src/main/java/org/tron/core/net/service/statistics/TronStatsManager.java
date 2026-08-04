@@ -11,8 +11,6 @@ import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.TronNetService;
 import org.tron.p2p.stats.P2pStats;
 
@@ -58,26 +56,18 @@ public class TronStatsManager {
   private void work() {
     P2pStats stats = TronNetService.getP2pService().getP2pStats();
 
-    MetricsUtil.meterMark(MetricsKey.NET_TCP_IN_TRAFFIC,
-            stats.getTcpInSize() - TCP_TRAFFIC_IN);
     Metrics.histogramObserve(MetricKeys.Histogram.TCP_BYTES,
             stats.getTcpInSize() - TCP_TRAFFIC_IN,
             MetricLabels.Histogram.TRAFFIC_IN);
 
-    MetricsUtil.meterMark(MetricsKey.NET_TCP_OUT_TRAFFIC,
-            stats.getTcpOutSize() - TCP_TRAFFIC_OUT);
     Metrics.histogramObserve(MetricKeys.Histogram.TCP_BYTES,
             stats.getTcpOutSize() - TCP_TRAFFIC_OUT,
             MetricLabels.Histogram.TRAFFIC_OUT);
 
-    MetricsUtil.meterMark(MetricsKey.NET_UDP_IN_TRAFFIC,
-            stats.getUdpInSize() - UDP_TRAFFIC_IN);
     Metrics.histogramObserve(MetricKeys.Histogram.UDP_BYTES,
             stats.getUdpInSize() - UDP_TRAFFIC_IN,
             MetricLabels.Histogram.TRAFFIC_IN);
 
-    MetricsUtil.meterMark(MetricsKey.NET_UDP_OUT_TRAFFIC,
-            stats.getUdpOutSize() - UDP_TRAFFIC_OUT);
     Metrics.histogramObserve(MetricKeys.Histogram.UDP_BYTES,
             stats.getUdpOutSize() - UDP_TRAFFIC_OUT,
             MetricLabels.Histogram.TRAFFIC_OUT);

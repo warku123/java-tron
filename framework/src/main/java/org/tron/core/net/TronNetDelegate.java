@@ -310,7 +310,6 @@ public class TronNetDelegate {
           | VMIllegalException
           | ZksnarkException
           | EventBloomException e) {
-        metricsService.failProcessBlock(block.getNum(), e.getMessage());
         logger.error("Process block failed, {}, reason: {}", blockId.getString(), e.getMessage());
         if (e instanceof BadBlockException
                 && ((BadBlockException) e).getType().equals(CALC_MERKLE_ROOT_FAILED)) {

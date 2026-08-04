@@ -138,8 +138,6 @@ import org.tron.core.exception.VMIllegalException;
 import org.tron.core.exception.ValidateScheduleException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.exception.ZksnarkException;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.service.MortgageService;
 import org.tron.core.service.RewardViCalService;
 import org.tron.core.services.event.exception.EventException;
@@ -1098,7 +1096,6 @@ public class Manager {
       TransactionExpirationException, NonCommonBlockException, ReceiptCheckErrException,
       VMIllegalException, ZksnarkException, BadBlockException, EventBloomException {
 
-    MetricsUtil.meterMark(MetricsKey.BLOCKCHAIN_FORK_COUNT);
     Metrics.counterInc(MetricKeys.Counter.BLOCK_FORK, 1, MetricLabels.ALL);
 
     Pair<LinkedList<KhaosBlock>, LinkedList<KhaosBlock>> binaryTree;
@@ -1108,7 +1105,6 @@ public class Manager {
               newHead.getBlockId(), getDynamicPropertiesStore().getLatestBlockHeaderHash());
     } catch (NonCommonBlockException e) {
       Metrics.counterInc(MetricKeys.Counter.BLOCK_FORK, 1, MetricLabels.FAIL);
-      MetricsUtil.meterMark(MetricsKey.BLOCKCHAIN_FAIL_FORK_COUNT);
       logger.info(
           "This is not the most recent common ancestor, "
               + "need to remove all blocks in the fork chain.");
@@ -1175,7 +1171,6 @@ public class Manager {
         } finally {
           if (exception != null) {
             Metrics.counterInc(MetricKeys.Counter.BLOCK_FORK, 1, MetricLabels.FAIL);
-            MetricsUtil.meterMark(MetricsKey.BLOCKCHAIN_FAIL_FORK_COUNT);
             logger.warn("Switch back because exception thrown while switching forks.", exception);
             first.forEach(khaosBlock -> khaosDb.removeBlk(khaosBlock.getBlk().getBlockId()));
             khaosDb.setHead(binaryTree.getValue().peekFirst());
@@ -1414,8 +1409,6 @@ public class Manager {
         }
 
         long cost = System.currentTimeMillis() - start;
-        MetricsUtil.meterMark(MetricsKey.BLOCKCHAIN_BLOCK_PROCESS_TIME, cost);
-
         logger.info("PushBlock block number: {}, cost/txs: {}/{} {}.",
                 block.getNum(), cost, block.getTransactions().size(), cost > 1000);
 
