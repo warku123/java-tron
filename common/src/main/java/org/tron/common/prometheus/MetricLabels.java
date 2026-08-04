@@ -78,4 +78,14 @@ public class MetricLabels {
 
   }
 
+  // Info
+  public static class Info {
+    public static final String VERSION = "version";
+
+    private Info() {
+      throw new IllegalStateException("Info");
+    }
+
+  }
+
 }

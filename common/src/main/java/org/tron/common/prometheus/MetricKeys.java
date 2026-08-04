@@ -44,6 +44,16 @@ public class MetricKeys {
 
   }
 
+  // Info
+  public static class Info {
+    public static final String NODE_INFO = "tron:node_info";
+
+    private Info() {
+      throw new IllegalStateException("Info");
+    }
+
+  }
+
   // Histogram
   public static class Histogram {
     public static final String HTTP_SERVICE_LATENCY = "tron:http_service_latency_seconds";
