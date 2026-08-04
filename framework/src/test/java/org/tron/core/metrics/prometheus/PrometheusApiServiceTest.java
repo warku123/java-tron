@@ -1,5 +1,6 @@
 package org.tron.core.metrics.prometheus;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import com.google.protobuf.ByteString;
 import io.prometheus.client.CollectorRegistry;
@@ -21,6 +22,7 @@ import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.ByteArray;
@@ -35,8 +37,11 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ConsensusService;
+import org.tron.core.metrics.MetricsService;
 import org.tron.core.net.TronNetDelegate;
+import org.tron.program.Version;
 import org.tron.protos.Protocol;
+import org.tron.protos.Protocol.Transaction;
 
 @Slf4j(topic = "metric")
 public class PrometheusApiServiceTest extends BaseTest {
@@ -204,6 +209,95 @@ public class PrometheusApiServiceTest extends BaseTest {
     blockCapsule.setMerkleRoot();
     blockCapsule.sign(ByteArray.fromHexString(witnessAddressMap.get(witnessAddress)));
     return blockCapsule;
+  }
+
+  @Test
+  public void testNodeInfoMetric() {
+    String version = Version.getVersion();
+    Metrics.info(MetricKeys.Info.NODE_INFO, version);
+    // Prometheus Info collector appends "_info" to the sample name
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:node_info_info",
+        new String[] {MetricLabels.Info.VERSION},
+        new String[] {version});
+    Assert.assertNotNull("tron:node_info_info sample should exist", value);
+    Assert.assertEquals(1.0, value, 0.0);
+  }
+
+  @Test
+  public void testNodeInfoUnknownKey() {
+    // unknown key exercises the null-guard branch in MetricsInfo.set
+    Metrics.info("tron:unknown_info", "x");
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:unknown_info_info",
+        new String[] {"version"},
+        new String[] {"x"});
+    Assert.assertNull(value);
+  }
+
+  @Test
+  public void testApplyBlockDupWitness() {
+    MetricsService metricsService = new MetricsService();
+    long time = System.currentTimeMillis();
+    byte[] witnessBytes = new byte[21];
+    witnessBytes[0] = (byte) 0xAB;
+    ByteString witness = ByteString.copyFrom(witnessBytes);
+
+    byte[] hash1Bytes = new byte[32];
+    byte[] hash2Bytes = new byte[32];
+    hash2Bytes[0] = 1;
+    BlockCapsule block1 = new BlockCapsule(1, Sha256Hash.wrap(ByteString.copyFrom(hash1Bytes)),
+        time, witness);
+    BlockCapsule block2 = new BlockCapsule(2, Sha256Hash.wrap(ByteString.copyFrom(hash2Bytes)),
+        time, witness);
+
+    String witnessBase58 = StringUtil.encode58Check(witness.toByteArray());
+    Double before = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:miner_total",
+        new String[] {"miner", "type"},
+        new String[] {witnessBase58, MetricLabels.Counter.MINE_DUP});
+    if (before == null) {
+      before = 0.0;
+    }
+
+    metricsService.applyBlock(block1);
+    metricsService.applyBlock(block2);
+
+    Double after = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:miner_total",
+        new String[] {"miner", "type"},
+        new String[] {witnessBase58, MetricLabels.Counter.MINE_DUP});
+    Assert.assertNotNull("dup miner counter should exist", after);
+    Assert.assertEquals(before + 1.0, after, 0.0);
+  }
+
+  @Test
+  public void testApplyBlockWithTxs() {
+    MetricsService metricsService = new MetricsService();
+    byte[] witnessBytes = new byte[21];
+    witnessBytes[0] = (byte) 0xCD;
+    ByteString witness = ByteString.copyFrom(witnessBytes);
+
+    Transaction tx = Transaction.newBuilder().build();
+    BlockCapsule block = new BlockCapsule(1, ByteString.copyFrom(new byte[32]),
+        System.currentTimeMillis(), ImmutableList.of(tx));
+
+    Double before = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:txs_total",
+        new String[] {"type", "detail"},
+        new String[] {MetricLabels.Counter.TXS_SUCCESS, MetricLabels.Counter.TXS_SUCCESS});
+    if (before == null) {
+      before = 0.0;
+    }
+
+    metricsService.applyBlock(block);
+
+    Double after = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron:txs_total",
+        new String[] {"type", "detail"},
+        new String[] {MetricLabels.Counter.TXS_SUCCESS, MetricLabels.Counter.TXS_SUCCESS});
+    Assert.assertNotNull("txs counter should exist", after);
+    Assert.assertEquals(before + 1.0, after, 0.0);
   }
 
 }
