@@ -226,8 +226,6 @@ public class ParameterTest {
     assertEquals(500, parameter.getMaxTransactionPendingSize());
     parameter.setPendingTransactionTimeout(500);
     assertEquals(500, parameter.getPendingTransactionTimeout());
-    parameter.setNodeMetricsEnable(false);
-    assertFalse(parameter.isNodeMetricsEnable());
     parameter.setMetricsPrometheusPort(3000);
     assertEquals(3000, parameter.getMetricsPrometheusPort());
     parameter.setAgreeNodeCount(10);

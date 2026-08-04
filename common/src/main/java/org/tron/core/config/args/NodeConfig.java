@@ -68,7 +68,6 @@ public class NodeConfig {
   }
 
   private int inactiveThreshold = 600;
-  private boolean metricsEnable = false;
   private int blockProducedTimeOut = 50;
   private int netMaxTrxPerSecond = 700;
   private boolean nodeDetectEnable = false;
