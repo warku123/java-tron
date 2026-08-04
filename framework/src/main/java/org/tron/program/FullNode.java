@@ -10,6 +10,7 @@ import org.tron.common.arch.Arch;
 import org.tron.common.exit.ExitManager;
 import org.tron.common.log.LogService;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.Metrics;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
@@ -50,6 +51,7 @@ public class FullNode {
 
     // init metrics first
     Metrics.init();
+    Metrics.info(MetricKeys.Info.NODE_INFO, Version.getVersion());
 
     DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
     beanFactory.setAllowCircularReferences(false);
