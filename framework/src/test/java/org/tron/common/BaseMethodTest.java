@@ -10,6 +10,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.common.application.Application;
 import org.tron.common.application.ApplicationFactory;
 import org.tron.common.application.TronApplicationContext;
+import org.tron.common.utils.PeerManagerStateResetter;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
@@ -57,6 +58,7 @@ public abstract class BaseMethodTest {
 
   @Before
   public final void initContext() throws IOException {
+    PeerManagerStateResetter.reset();
     String[] baseArgs = new String[]{
         "--output-directory", temporaryFolder.newFolder().toString()};
     String[] allArgs = mergeArgs(baseArgs, extraArgs());

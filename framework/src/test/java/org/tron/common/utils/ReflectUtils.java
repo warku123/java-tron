@@ -7,21 +7,29 @@ import org.springframework.util.ReflectionUtils;
 public class ReflectUtils {
 
   public static Object getFieldObject(Object target, String fieldName) {
-    Field field = ReflectionUtils.findField(target.getClass(), fieldName);
+    Field field = ReflectionUtils.findField(getTargetClass(target), fieldName);
     ReflectionUtils.makeAccessible(field);
-    return ReflectionUtils.getField(field, target);
+    return ReflectionUtils.getField(field, getFieldTarget(target));
   }
 
   public static <T> T getFieldValue(Object target, String fieldName) {
-    Field field = ReflectionUtils.findField(target.getClass(), fieldName);
+    Field field = ReflectionUtils.findField(getTargetClass(target), fieldName);
     ReflectionUtils.makeAccessible(field);
-    return (T) ReflectionUtils.getField(field, target);
+    return (T) ReflectionUtils.getField(field, getFieldTarget(target));
   }
 
   public static void setFieldValue(Object target, String fieldName, Object value) {
-    Field field = ReflectionUtils.findField(target.getClass(), fieldName);
+    Field field = ReflectionUtils.findField(getTargetClass(target), fieldName);
     ReflectionUtils.makeAccessible(field);
-    ReflectionUtils.setField(field, target, value);
+    ReflectionUtils.setField(field, getFieldTarget(target), value);
+  }
+
+  private static Class<?> getTargetClass(Object target) {
+    return target instanceof Class ? (Class<?>) target : target.getClass();
+  }
+
+  private static Object getFieldTarget(Object target) {
+    return target instanceof Class ? null : target;
   }
 
   public static <T> T invokeMethod(Object target, String methodName) {
