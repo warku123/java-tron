@@ -263,6 +263,11 @@ public class ShieldedReceiveTest extends BaseTest {
     Assert.assertTrue(wallet.isMining());
   }
 
+  /**
+   * Starts ConsensusService to initialize and persist the active witness schedule, then stops it
+   * because these tests need the schedule, not the background DPoS producer. This avoids the
+   * producer competing with manual block production and Merkle/snapshot operations.
+   */
   private void initializeActiveWitnessSchedule() {
     synchronized (ShieldedReceiveTest.class) {
       if (consensusScheduleInitialized) {

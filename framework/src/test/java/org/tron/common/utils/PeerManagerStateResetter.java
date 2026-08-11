@@ -10,7 +10,21 @@ import org.tron.common.es.ExecutorServiceManager;
 import org.tron.core.net.peer.PeerConnection;
 import org.tron.core.net.peer.PeerManager;
 
-/** Resets PeerManager's process-wide test state without changing production code. */
+/**
+ * Test source-set utility for restoring PeerManager to a cold-start state.
+ *
+ * <p>{@link PeerManager#close()} disconnects visible peers but does not clear its raw static
+ * peers or counters. Its static executor also remains shut down and is not rebuilt by normal
+ * initialization. Tests reuse one JVM across Spring contexts, so this reset is needed before
+ * another test starts.
+ *
+ * <p>The current BaseTest/BaseMethodTest wiring is intentionally broad to protect tests that
+ * reuse Spring contexts or the JVM from unknown preceding pollution. For tests that do not use
+ * PeerManager, reset is idempotent and low-impact: it typically clears an empty list and zeros
+ * counters, while the executor is replaced only when dead or null and threads are created on
+ * demand. If production PeerManager lifecycle becomes restart-safe, this wiring can be narrowed
+ * or this utility can be removed in the future.
+ */
 public final class PeerManagerStateResetter {
 
   private static final String EXECUTOR_NAME = "peer-manager";
