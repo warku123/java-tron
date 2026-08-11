@@ -77,7 +77,7 @@ public class TransferToAccountTest extends BaseTest {
   }
 
   @After
-  public void after() {
+  public void clearVmThreadLocal() {
     VMConfig.clearLocalSnapshot();
   }
 
