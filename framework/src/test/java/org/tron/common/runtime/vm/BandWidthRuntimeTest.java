@@ -85,12 +85,6 @@ public class BandWidthRuntimeTest extends BaseTest {
     //init energy
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(1526547838000L);
     dbManager.getDynamicPropertiesStore().saveTotalEnergyWeight(10_000_000L);
-    // The hard-coded energy assertions below assume these fork proposals are on.
-    // Save them explicitly: other tests may leave them disabled in the store.
-    dbManager.getDynamicPropertiesStore().saveAllowTvmConstantinople(1);
-    dbManager.getDynamicPropertiesStore().saveAllowTvmSolidity059(1);
-    dbManager.getDynamicPropertiesStore().saveAllowTvmIstanbul(1);
-
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(0);
 
     AccountCapsule accountCapsule = new AccountCapsule(ByteString.copyFrom("owner".getBytes()),

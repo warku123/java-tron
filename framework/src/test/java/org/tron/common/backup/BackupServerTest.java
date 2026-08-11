@@ -78,6 +78,7 @@ public class BackupServerTest {
   @Test(timeout = 60_000)
   public void test() throws Exception {
     backupServer.initServer();
+    // Startup is asynchronous, so wait for the channel instead of using a fixed delay.
     awaitCondition("backup channel to become active", () -> getChannel() != null
         && getChannel().isActive());
     Channel channel = getChannel();
@@ -86,6 +87,7 @@ public class BackupServerTest {
     backupServer.close();
     backupServerClosed = true;
 
+    // Verify close stopped all resources before the next test can start.
     Assert.assertFalse("backup channel must close", channel.isOpen());
     assertExecutorsTerminated();
   }
