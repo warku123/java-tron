@@ -3,6 +3,7 @@ package org.tron.common.runtime.vm;
 import com.google.protobuf.ByteString;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -73,6 +74,11 @@ public class TransferToAccountTest extends BaseTest {
             AccountType.AssetIssue);
 
     ownerCapsule.setBalance(1000_1000_1000L);
+  }
+
+  @After
+  public void after() {
+    VMConfig.clearLocalSnapshot();
   }
 
   private long createAsset(String tokenName) {
@@ -258,15 +264,8 @@ public class TransferToAccountTest extends BaseTest {
 
     VMActuator vmActuator = new VMActuator(true);
 
-    try {
-      vmActuator.validate(context);
-      vmActuator.execute(context);
-    } finally {
-      // A constant call installs a thread-local VM config view
-      // (ConfigLoader.load with isolate=true). Drop it so later tests running on
-      // this JUnit thread are not silently executed against this test's flags.
-      VMConfig.clearLocalSnapshot();
-    }
+    vmActuator.validate(context);
+    vmActuator.execute(context);
 
     ProgramResult result = context.getProgramResult();
 

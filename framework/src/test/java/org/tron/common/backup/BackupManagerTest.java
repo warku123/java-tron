@@ -37,8 +37,7 @@ public class BackupManagerTest {
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
   private BackupManager manager;
   private BackupServer backupServer;
-  private BiFunction<String, Boolean, InetAddress> previousDnsLookup;
-  private boolean backupServerClosed;
+  private BiFunction<String, Boolean, InetAddress> savedLookup;
 
   @Before
   public void setUp() throws Exception {
@@ -47,34 +46,54 @@ public class BackupManagerTest {
     CommonParameter.getInstance().setBackupPort(PublicMethod.chooseRandomPort());
     manager = new BackupManager();
     backupServer = new BackupServer(manager);
-    previousDnsLookup = InetUtil.dnsLookup;
+    savedLookup = InetUtil.dnsLookup;
   }
 
   @After
   public void tearDown() throws Exception {
     Throwable failure = null;
-    try {
-      if (!backupServerClosed && backupServer != null) {
-        backupServer.close();
-      }
-    } catch (Throwable t) {
-      failure = t;
-    } finally {
+    Channel channel = null;
+    if (backupServer != null) {
       try {
-        if (manager != null) {
-          manager.stop();
-        }
-        assertExecutorsTerminated();
+        channel = getChannel(backupServer);
+      } catch (Throwable t) {
+        failure = t;
+      }
+      try {
+        backupServer.close();
       } catch (Throwable t) {
         if (failure == null) {
           failure = t;
         } else {
           failure.addSuppressed(t);
         }
-      } finally {
-        InetUtil.dnsLookup = previousDnsLookup;
-        Args.clearParam();
       }
+    }
+    try {
+      if (manager != null) {
+        manager.stop();
+      }
+    } catch (Throwable t) {
+      if (failure == null) {
+        failure = t;
+      } else {
+        failure.addSuppressed(t);
+      }
+    }
+    try {
+      if (channel != null) {
+        Assert.assertFalse("backup channel must close", channel.isOpen());
+      }
+      assertExecutorsTerminated();
+    } catch (Throwable t) {
+      if (failure == null) {
+        failure = t;
+      } else {
+        failure.addSuppressed(t);
+      }
+    } finally {
+      InetUtil.dnsLookup = savedLookup;
+      Args.clearParam();
     }
     if (failure != null) {
       throw new AssertionError("backup test cleanup failed", failure);
@@ -150,7 +169,7 @@ public class BackupManagerTest {
   }
 
   @Test
-  public void testBackupServerLifecycleDuringKeepAliveInterval() throws Exception {
+  public void testSendKeepAliveMessage() throws Exception {
     CommonParameter parameter = CommonParameter.getInstance();
     parameter.setBackupPriority(8);
     List<String> members = new ArrayList<>();
@@ -163,21 +182,12 @@ public class BackupManagerTest {
 
     Assert.assertEquals(manager.getStatus(), BackupManager.BackupStatusEnum.MASTER);
     backupServer.initServer();
-    awaitCondition("backup channel to become active", () -> getChannel(backupServer) != null
-        && getChannel(backupServer).isActive());
-    awaitCondition("backup message handler assignment", () -> getFieldValue(manager,
-        "messageHandler") != null);
+    awaitBackupServerReady();
     manager.init();
-    long keepAliveDeadline = System.nanoTime()
-        + TimeUnit.MILLISECONDS.toNanos(parameter.getKeepAliveInterval() + 1000L);
-    awaitCondition("keep-alive interval", () -> System.nanoTime() >= keepAliveDeadline);
+    Thread.sleep(parameter.getKeepAliveInterval() + 1000);
+    // test send KeepAliveMessage
 
     Assert.assertEquals(BackupManager.BackupStatusEnum.INIT, manager.getStatus());
-    Channel channel = getChannel(backupServer);
-    backupServer.close();
-    backupServerClosed = true;
-    Assert.assertFalse("backup channel must close", channel.isOpen());
-    assertExecutorsTerminated();
   }
 
   // ===== domain-handling tests for init() =====
@@ -298,6 +308,12 @@ public class BackupManagerTest {
     } catch (Exception e) {
       throw new AssertionError("cannot inspect " + name, e);
     }
+  }
+
+  private void awaitBackupServerReady() throws Exception {
+    awaitCondition("backup server to become ready", () -> getChannel(backupServer) != null
+        && getChannel(backupServer).isActive()
+        && getFieldValue(manager, "messageHandler") != null);
   }
 
   private void assertExecutorsTerminated() throws Exception {
