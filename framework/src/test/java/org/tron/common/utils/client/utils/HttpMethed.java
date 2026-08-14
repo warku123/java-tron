@@ -1475,19 +1475,6 @@ public class HttpMethed {
   }
 
   /** constructor. */
-  public static HttpResponse getStatsInfo(String httpNode) {
-    try {
-      String requestUrl = "http://" + httpNode + "/monitor/getstatsinfo";
-      response = createConnectForGet(requestUrl);
-    } catch (Exception e) {
-      e.printStackTrace();
-      httppost.releaseConnection();
-      return null;
-    }
-    return response;
-  }
-
-  /** constructor. */
   public static HttpResponse getNextmaintenanceTime(String httpNode) {
     try {
       String requestUrl = "http://" + httpNode + "/wallet/getnextmaintenancetime";
