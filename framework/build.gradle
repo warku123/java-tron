@@ -39,6 +39,10 @@ dependencies {
     implementation fileTree(dir: 'libs', include: '*.jar')
     // end local libraries
     implementation group: 'com.beust', name: 'jcommander', version: '1.78'
+    implementation('io.netty:netty-codec-protobuf:4.2.15.Final') {
+        exclude group: 'com.google.protobuf'
+        exclude group: 'com.google.protobuf.nano'
+    }
     // http
     implementation 'org.eclipse.jetty:jetty-server:9.4.58.v20250814'
     implementation 'org.eclipse.jetty:jetty-servlet:9.4.58.v20250814'
