@@ -46,7 +46,7 @@ public class MetricKeys {
 
   // Info
   public static class Info {
-    public static final String NODE_INFO = "tron:node_info";
+    public static final String NODE_INFO = "tron:node";
 
     private Info() {
       throw new IllegalStateException("Info");

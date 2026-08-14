@@ -51,7 +51,6 @@ public class FullNode {
 
     // init metrics first
     Metrics.init();
-    Metrics.info(MetricKeys.Info.NODE_INFO, Version.getVersion());
 
     DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
     beanFactory.setAllowCircularReferences(false);
@@ -62,6 +61,9 @@ public class FullNode {
     Application appT = ApplicationFactory.create(context);
     context.registerShutdownHook();
     appT.startup();
+    // chainId is only available after the context refresh (Manager.initGenesis)
+    Metrics.info(MetricKeys.Info.NODE_INFO, Version.getVersion(),
+        Args.getInstance().getChainId());
     if (parameter.isSolidityNode()) {
       SolidityNode node = context.getBean(SolidityNode.class);
       node.run();

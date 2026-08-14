@@ -11,7 +11,8 @@ class MetricsInfo {
   private static final Map<String, Info> container = new ConcurrentHashMap<>();
 
   static {
-    init(MetricKeys.Info.NODE_INFO, "tron node info .", MetricLabels.Info.VERSION);
+    init(MetricKeys.Info.NODE_INFO, "tron node info.",
+        MetricLabels.Info.VERSION, MetricLabels.Info.CHAIN_ID);
   }
 
   private MetricsInfo() {
