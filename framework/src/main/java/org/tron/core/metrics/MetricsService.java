@@ -27,20 +27,21 @@ public class MetricsService {
       long nowTime = System.currentTimeMillis();
       byte[] address = block.getWitnessAddress().toByteArray();
       String witnessAddress = Hex.toHexString(address);
+      String encodeAddress = StringUtil.encode58Check(address);
 
       if (witnessInfo.containsKey(witnessAddress)) {
         BlockCapsule oldBlock = witnessInfo.get(witnessAddress);
         if ((!oldBlock.getBlockId().equals(block.getBlockId()))
             && oldBlock.getTimeStamp() == block.getTimeStamp()) {
           Metrics.counterInc(MetricKeys.Counter.MINER, 1,
-              StringUtil.encode58Check(address), MetricLabels.Counter.MINE_DUP);
+              encodeAddress, MetricLabels.Counter.MINE_DUP);
         }
       }
       witnessInfo.put(witnessAddress, block);
 
       long netTime = nowTime - block.getTimeStamp();
       Metrics.histogramObserve(MetricKeys.Histogram.MINER_LATENCY,
-          netTime / Metrics.MILLISECONDS_PER_SECOND, StringUtil.encode58Check(address));
+          netTime / Metrics.MILLISECONDS_PER_SECOND, encodeAddress);
 
       int txCount = block.getTransactions().size();
       if (txCount > 0) {
