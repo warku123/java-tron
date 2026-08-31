@@ -1370,7 +1370,6 @@ public class ShieldedReceiveTest extends BaseTest {
 
     updateTotalShieldedPoolValue(builder.getValueBalance());
     TransactionCapsule transactionCap = builder.build();
-    Assert.assertTrue(true);
   }
 
   /*
@@ -1799,7 +1798,7 @@ public class ShieldedReceiveTest extends BaseTest {
 
     List<Actuator> actuator = ActuatorCreator.getINSTANCE().createActuator(transactionCap);
     actuator.get(0).validate(); //there is hash(transaction) in librustzcashSaplingFinalCheck
-    Assert.assertTrue(true);
+    Assert.assertEquals(1, actuator.size());
   }
 
   /*
@@ -1838,7 +1837,7 @@ public class ShieldedReceiveTest extends BaseTest {
 
     List<Actuator> actuator = ActuatorCreator.getINSTANCE().createActuator(transactionCap);
     actuator.get(0).validate(); //there is hash(transaction) in librustzcashSaplingFinalCheck
-    Assert.assertTrue(true);
+    Assert.assertEquals(1, actuator.size());
   }
 
   /*
@@ -1969,7 +1968,7 @@ public class ShieldedReceiveTest extends BaseTest {
 
     List<Actuator> actuator = ActuatorCreator.getINSTANCE().createActuator(transactionCap);
     actuator.get(0).validate(); //there is hash(transaction) in librustzcashSaplingFinalCheck
-    Assert.assertTrue(true);
+    Assert.assertEquals(1, actuator.size());
   }
 
   /*
@@ -2008,7 +2007,7 @@ public class ShieldedReceiveTest extends BaseTest {
 
     List<Actuator> actuator = ActuatorCreator.getINSTANCE().createActuator(transactionCap);
     actuator.get(0).validate(); //there is hash(transaction) in librustzcashSaplingFinalCheck
-    Assert.assertTrue(true);
+    Assert.assertEquals(1, actuator.size());
   }
 
   /*
@@ -2433,7 +2432,7 @@ public class ShieldedReceiveTest extends BaseTest {
     List<String> localPrivateKeys = Args.getLocalWitnesses().getPrivateKeys();
     byte[] privateKey = ByteArray.fromHexString(localPrivateKeys.get(0));
     final ECKey ecKey = ECKey.fromPrivate(privateKey);
-    assert ecKey != null;
+    Assert.assertNotNull(ecKey);
     byte[] witnessAddress = ecKey.getAddress();
     WitnessCapsule witnessCapsule = new WitnessCapsule(ByteString.copyFrom(witnessAddress));
     // Initialize the same schedule as DPoS startup without starting its producer thread.
