@@ -89,6 +89,7 @@ public class BlockMsgHandler implements TronMsgHandler {
       }
       Long time = peer.getAdvInvRequest().remove(item);
       if (null != time) {
+        peer.updateFetchLatency(now - time);
         Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_FETCH_LATENCY,
             (now - time) / Metrics.MILLISECONDS_PER_SECOND);
       }

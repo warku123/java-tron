@@ -95,8 +95,7 @@ public class FetchBlockService {
         .filter(PeerConnection::isIdle)
         .filter(filterPeer -> !filterPeer.equals(fetchBlock.getPeer()))
         .filter(filterPeer -> filterPeer.getAdvInvReceive().getIfPresent(item) != null)
-        .filter(filterPeer -> getPeerLatency(filterPeer)
-            <= CommonParameter.getInstance().fetchBlockTimeout)
+        // Clamping bounds latency by timeout; min() ordering handles candidate selection.
         .min(Comparator.comparingDouble(this::getPeerLatency));
 
     if (optionalPeerConnection.isPresent()) {
@@ -121,7 +120,14 @@ public class FetchBlockService {
     double newPeerLatency = getPeerLatency(newPeer);
     double oldPeerLatency = getPeerLatency(fetchBlock.getPeer());
     long oldPeerSpendTime = System.currentTimeMillis() - fetchBlock.getTime();
-    if (oldPeerLatency > fetchTimeOut || oldPeerSpendTime >= fetchTimeOut) {
+    // Switch unconditionally on a hard timeout: an unseeded or saturated old peer must not
+    // permanently wedge fetchBlockInfo.
+    if (oldPeerSpendTime >= fetchTimeOut) {
+      return true;
+    }
+
+    // Require a strictly better peer for the latency saturation gate to prevent 500v500 flapping.
+    if (oldPeerLatency >= fetchTimeOut && newPeerLatency < oldPeerLatency) {
       return true;
     }
 
@@ -131,7 +137,7 @@ public class FetchBlockService {
   }
 
   private double getPeerLatency(PeerConnection peerConnection) {
-    return peerConnection.getChannel().getAvgLatency();
+    return peerConnection.getFetchLatency();
   }
 
   private static class FetchBlockInfo {
