@@ -897,6 +897,7 @@ public class Manager {
     if (isExchangeTransaction(trx.getInstance())) {
       throw new ContractValidateException("ExchangeTransactionContract is rejected");
     }
+    rejectClosedExchange(trx.getInstance());
 
     pushTransactionQueue.add(trx);
     Metrics.gaugeInc(MetricKeys.Gauge.MANAGER_QUEUE, 1,
@@ -1732,6 +1733,9 @@ public class Manager {
       if (isExchangeTransaction(transaction)) {
         continue;
       }
+      if (isClosedExchange(transaction)) {
+        continue;
+      }
 
       if (ownerAddressSet.contains(ownerAddress)) {
         trx.setVerified(false);
@@ -1820,7 +1824,36 @@ public class Manager {
     }
   }
 
+  private int closedExchangeLevelRequired(Transaction transaction) {
+    switch (transaction.getRawData().getContract(0).getType()) {
+      case ExchangeCreateContract:
+      case ExchangeInjectContract:
+      case ExchangeTransactionContract:
+        return 1;
+      case ExchangeWithdrawContract:
+        return 2;
+      default:
+        return 0;
+    }
+  }
+
+  private boolean isClosedExchange(Transaction transaction) {
+    int required = closedExchangeLevelRequired(transaction);
+    int level = getDynamicPropertiesStore().getCloseExchange();
+    return required != 0 && (level == 1 && required == 1 || level == 2);
+  }
+
+  private void rejectClosedExchange(Transaction transaction)
+      throws ContractValidateException {
+    if (isClosedExchange(transaction)) {
+      throw new ContractValidateException(transaction.getRawData().getContract(0).getType()
+          + " is rejected by exchange close level "
+          + getDynamicPropertiesStore().getCloseExchange());
+    }
+  }
+
   private void rejectExchangeTransaction(Transaction transaction) throws ContractValidateException {
+    rejectClosedExchange(transaction);
     if (isExchangeTransaction(transaction) && chainBaseManager.getForkController()
             .pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_0_1)) {
       throw new ContractValidateException("ExchangeTransactionContract is rejected");

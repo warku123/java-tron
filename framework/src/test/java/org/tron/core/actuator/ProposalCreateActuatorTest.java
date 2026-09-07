@@ -8,6 +8,7 @@ import static org.tron.core.config.Parameter.ChainConstant.ONE_YEAR_BLOCK_NUMBER
 
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
+import java.util.Arrays;
 import java.util.HashMap;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
@@ -23,6 +24,8 @@ import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.ProposalCapsule;
 import org.tron.core.capsule.TransactionResultCapsule;
 import org.tron.core.capsule.WitnessCapsule;
+import org.tron.core.config.Parameter;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
@@ -463,5 +466,121 @@ public class ProposalCreateActuatorTest extends BaseTest {
 
   }
 
+  // -------------------------------------------------------------------------------------------
+  // CLOSE_EXCHANGE single-parameter constraint regression tests
+  // -------------------------------------------------------------------------------------------
+
+  private ProposalCreateActuator buildCreateActuator(HashMap<Long, Long> paras) {
+    ProposalCreateActuator actuator = new ProposalCreateActuator();
+    actuator.setChainBaseManager(dbManager.getChainBaseManager())
+        .setForkUtils(dbManager.getChainBaseManager().getForkController())
+        .setAny(getContract(OWNER_ADDRESS_FIRST, paras));
+    return actuator;
+  }
+
+  /**
+   * A proposal containing CLOSE_EXCHANGE plus any other parameter must be rejected up
+   * front; unrelated multi-parameter proposals stay untouched.
+   */
+  @Test
+  public void closeExchangeProposalMustBeSingleParameter() {
+    // CLOSE_EXCHANGE + one unrelated parameter -> rejected
+    HashMap<Long, Long> paras = new HashMap<>();
+    paras.put(99L, 1L);
+    paras.put(0L, 1000000L);
+    ContractValidateException e = assertThrows(ContractValidateException.class,
+        () -> buildCreateActuator(paras).validate());
+    Assert.assertEquals("CLOSE_EXCHANGE proposal must contain only one parameter",
+        e.getMessage());
+
+    // CLOSE_EXCHANGE + two unrelated parameters -> rejected as well
+    paras.put(2L, 1000L);
+    e = assertThrows(ContractValidateException.class,
+        () -> buildCreateActuator(paras).validate());
+    Assert.assertEquals("CLOSE_EXCHANGE proposal must contain only one parameter",
+        e.getMessage());
+
+    // unrelated multi-parameter proposals are unchanged (no CLOSE_EXCHANGE key)
+    HashMap<Long, Long> unrelated = new HashMap<>();
+    unrelated.put(0L, 1000000L);
+    unrelated.put(2L, 1000L);
+    try {
+      buildCreateActuator(unrelated).validate();
+    } catch (ContractValidateException ex) {
+      Assert.fail("unrelated multi-parameter proposal must still validate: " + ex.getMessage());
+    }
+  }
+
+  /**
+   * A single-parameter CLOSE_EXCHANGE proposal passes the constraint check and reaches the
+   * per-value validation, which rejects it while the VERSION_CLOSE_EXCHANGE fork is not
+   * passed yet.
+   */
+  @Test
+  public void closeExchangeSingleParamRejectedByForkGateWhenForkUnpassed() {
+    HashMap<Long, Long> paras = new HashMap<>();
+    paras.put(99L, 1L);
+    ContractValidateException e = assertThrows(ContractValidateException.class,
+        () -> buildCreateActuator(paras).validate());
+    Assert.assertEquals("Bad chain parameter id [CLOSE_EXCHANGE].", e.getMessage());
+  }
+
+  /**
+   * After the fork, a single-parameter CLOSE_EXCHANGE proposal validates and executes.
+   */
+  @Test
+  public void closeExchangeSingleParamSuccessAfterFork() {
+    activateCloseExchangeFork();
+    try {
+      HashMap<Long, Long> paras = new HashMap<>();
+      paras.put(99L, 1L);
+      ProposalCreateActuator actuator = buildCreateActuator(paras);
+      TransactionResultCapsule ret = new TransactionResultCapsule();
+      try {
+        actuator.validate();
+        actuator.execute(ret);
+      } catch (Exception ex) {
+        Assert.fail("single-parameter CLOSE_EXCHANGE proposal must succeed after fork: "
+            + ex.getMessage());
+      }
+      Assert.assertEquals(code.SUCESS, ret.getInstance().getRet());
+      long id = dbManager.getDynamicPropertiesStore().getLatestProposalNum();
+      try {
+        ProposalCapsule proposalCapsule =
+            dbManager.getProposalStore().get(ByteArray.fromLong(id));
+        Assert.assertNotNull(proposalCapsule);
+        Assert.assertEquals(1L, proposalCapsule.getParameters().get(99L).longValue());
+      } catch (ItemNotFoundException ex) {
+        Assert.fail("created CLOSE_EXCHANGE proposal must be stored: " + ex.getMessage());
+      }
+    } finally {
+      deactivateCloseExchangeFork();
+    }
+  }
+
+  /**
+   * VERSION_CLOSE_EXCHANGE: hardForkTime=0 (first maintenance interval), rate 100 (all
+   * stats slots required).
+   */
+  private void activateCloseExchangeFork() {
+    long maintenanceTimeInterval =
+        dbManager.getDynamicPropertiesStore().getMaintenanceTimeInterval();
+    long hardForkTime =
+        ((ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getHardForkTime() - 1)
+            / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
+    dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(hardForkTime + 1);
+    byte[] stats = new byte[27];
+    Arrays.fill(stats, (byte) 1);
+    dbManager.getDynamicPropertiesStore()
+        .statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), stats);
+    Assert.assertTrue(ForkController.instance()
+        .pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE));
+  }
+
+  private void deactivateCloseExchangeFork() {
+    dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(1000000);
+    dbManager.getDynamicPropertiesStore()
+        .statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), new byte[27]);
+  }
 
 }

@@ -38,6 +38,7 @@ public class ProposalUtilTest extends BaseTest {
   private static final long LONG_VALUE = 100_000_000_000_000_000L;
   private static final String LONG_VALUE_ERROR =
       "Bad chain parameter value, valid range is [0," + LONG_VALUE + "]";
+  private static final String BAD_PARAM_ID_MESSAGE = "Bad chain parameter id";
 
   @Resource
   private DynamicPropertiesStore dynamicPropertiesStore;
@@ -348,6 +349,8 @@ public class ProposalUtilTest extends BaseTest {
     testAllowHardenResourceCalculationProposal();
 
     testAllowHardenExchangeCalculationProposal();
+
+    testCloseExchangeProposal();
 
     forkUtils.getManager().getDynamicPropertiesStore()
         .statsByVersion(ForkBlockVersionEnum.ENERGY_LIMIT.getValue(), stats);
@@ -742,6 +745,110 @@ public class ProposalUtilTest extends BaseTest {
     } catch (Throwable e) {
       Assert.fail("Should pass when toggling 1 -> 0: " + e.getMessage());
     }
+  }
+
+  /**
+   * CLOSE_EXCHANGE(99): fork gate, step-by-step progression, and the post-fork rejection of
+   * the legacy exchange parameters 12 (EXCHANGE_CREATE_FEE) and 98
+   * (ALLOW_HARDEN_EXCHANGE_CALCULATION).
+   * Runs after testAllowHardenExchangeCalculationProposal, so VERSION_4_8_2 has passed but
+   * VERSION_CLOSE_EXCHANGE has not when this method starts.
+   */
+  private void testCloseExchangeProposal() {
+    long code = ProposalType.CLOSE_EXCHANGE.getCode();
+    long exchangeCreateFeeCode = ProposalType.EXCHANGE_CREATE_FEE.getCode();
+    long hardenExchangeCode = ProposalType.ALLOW_HARDEN_EXCHANGE_CALCULATION.getCode();
+
+    Assert.assertTrue("BLOCK_VERSION must be ready for VERSION_CLOSE_EXCHANGE",
+        Parameter.ChainConstant.BLOCK_VERSION
+            >= ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue());
+
+    // 1) fork VERSION_CLOSE_EXCHANGE not passed yet -> rejected, even though 4.8.2 passed
+    ContractValidateException thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
+    assertEquals("Bad chain parameter id [CLOSE_EXCHANGE].", thrown.getMessage());
+
+    // 2) before the fork, legacy EXCHANGE_CREATE_FEE is still proposable
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
+          1024_000_000L);
+    } catch (ContractValidateException e) {
+      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable before VERSION_CLOSE_EXCHANGE: "
+          + e.getMessage());
+    }
+
+    // 3) activate VERSION_CLOSE_EXCHANGE (hardForkTime=0 -> first maintenance interval,
+    //    rate 100 -> all stats bytes required)
+    activateFork(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE);
+
+    // 4) after the fork, legacy exchange parameters are rejected at creation
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
+            1024_000_000L));
+    assertEquals("Bad chain parameter id [EXCHANGE_CREATE_FEE]", thrown.getMessage());
+
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, hardenExchangeCode, 0));
+    assertEquals(BAD_PARAM_ID_MESSAGE, thrown.getMessage());
+
+    // 5) stepwise progression from current=0: jump to 2 is rejected
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 2));
+    assertEquals("This value[CLOSE_EXCHANGE] must be 1 and within [1,2]", thrown.getMessage());
+
+    // 6) proposing the current value again is rejected
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 0));
+    assertEquals("[CLOSE_EXCHANGE] has been set to 0, no need to propose again",
+        thrown.getMessage());
+
+    // 7) negative and out-of-range values are rejected
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, -1));
+    assertEquals("This value[CLOSE_EXCHANGE] must be 1 and within [1,2]", thrown.getMessage());
+
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, LONG_VALUE + 1));
+    assertEquals("This value[CLOSE_EXCHANGE] must be 1 and within [1,2]", thrown.getMessage());
+
+    // 8) current=0 -> only value 1 passes; applying it makes 1 the current value
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1);
+    } catch (ContractValidateException e) {
+      Assert.fail("0 -> 1 must be allowed: " + e.getMessage());
+    }
+    ProposalCapsule proposalCapsule = new ProposalCapsule(
+        Protocol.Proposal.newBuilder().putParameters(code, 1).build());
+    ProposalService.process(dbManager, proposalCapsule);
+
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
+    assertEquals("[CLOSE_EXCHANGE] has been set to 1, no need to propose again",
+        thrown.getMessage());
+
+    // 9) current=1 -> only value 2 passes
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 3));
+    assertEquals("This value[CLOSE_EXCHANGE] must be 2 and within [1,2]", thrown.getMessage());
+
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 2);
+    } catch (ContractValidateException e) {
+      Assert.fail("1 -> 2 must be allowed: " + e.getMessage());
+    }
+    proposalCapsule = new ProposalCapsule(
+        Protocol.Proposal.newBuilder().putParameters(code, 2).build());
+    ProposalService.process(dbManager, proposalCapsule);
+
+    // 10) current=2 is final: both lower and upper values are rejected, no level 3 exists
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
+    assertEquals("This value[CLOSE_EXCHANGE] must be 3 and within [1,2]", thrown.getMessage());
+
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 2));
+    assertEquals("[CLOSE_EXCHANGE] has been set to 2, no need to propose again",
+        thrown.getMessage());
   }
 
   private void testAllowMarketTransaction() {

@@ -89,7 +89,23 @@ public class ProposalService extends ProposalUtil {
           break;
         }
         case EXCHANGE_CREATE_FEE: {
+          if (manager.getChainBaseManager()
+              .getForkController().pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+            // Exchange creation is closed after VERSION_CLOSE_EXCHANGE; skip this entry
+            // but keep processing the remaining parameters in the same proposal.
+            break;
+          }
           manager.getDynamicPropertiesStore().saveExchangeCreateFee(entry.getValue());
+          break;
+        }
+        case CLOSE_EXCHANGE: {
+          int current = manager.getDynamicPropertiesStore().getCloseExchange();
+          // Defense-in-depth: only apply the next step of the graded {0,1,2} ladder.
+          // A crafted/historical proposal capsule must never push the level past 2
+          // (creation-side validation would never allow it; the apply side mirrors it).
+          if (entry.getValue() == current + 1 && entry.getValue() <= 2) {
+            manager.getDynamicPropertiesStore().saveCloseExchange(entry.getValue().intValue());
+          }
           break;
         }
         case MAX_CPU_TIME_OF_ONE_TX: {
@@ -408,6 +424,13 @@ public class ProposalService extends ProposalUtil {
           break;
         }
         case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
+          if (manager.getChainBaseManager()
+              .getForkController().pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+            // This parameter is rejected at creation after VERSION_CLOSE_EXCHANGE; skip
+            // application here but keep processing the remaining parameters in the
+            // same proposal (historical replay before the fork is unaffected).
+            break;
+          }
           manager.getDynamicPropertiesStore()
               .saveAllowHardenExchangeCalculation(entry.getValue());
           break;
