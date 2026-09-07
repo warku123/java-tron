@@ -5,6 +5,8 @@ import java.math.RoundingMode;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.math.StrictMathWrapper;
 
+/** @deprecated Exchange processing is retained for legacy state compatibility. */
+@Deprecated
 @Slf4j(topic = "capsule")
 public class SafeExchangeProcessor implements ExchangeCapsule.Processor {
 

@@ -1157,6 +1157,12 @@ public class Wallet {
             .setKey("getExchangeCreateFee")
             .setValue(chainBaseManager.getDynamicPropertiesStore().getExchangeCreateFee())
             .build());
+    //    CLOSE_EXCHANGE, // 0, 1, 2, 99
+    builder.addChainParameter(
+        Protocol.ChainParameters.ChainParameter.newBuilder()
+            .setKey("getCloseExchange")
+            .setValue(chainBaseManager.getDynamicPropertiesStore().getCloseExchange())
+            .build());
     //    MAX_CPU_TIME_OF_ONE_TX, // ms, 13
     builder.addChainParameter(
         Protocol.ChainParameters.ChainParameter.newBuilder()

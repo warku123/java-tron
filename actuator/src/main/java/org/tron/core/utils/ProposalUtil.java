@@ -73,6 +73,10 @@ public class ProposalUtil {
       }
       case ENERGY_FEE:
       case EXCHANGE_CREATE_FEE:
+        if (proposalType == ProposalType.EXCHANGE_CREATE_FEE
+            && forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+          throw new ContractValidateException("Bad chain parameter id [EXCHANGE_CREATE_FEE]");
+        }
         break;
       case MAX_CPU_TIME_OF_ONE_TX:
         if (dynamicPropertiesStore.getAllowHigherLimitForMaxCpuTimeOfOneTx() == 1) {
@@ -926,6 +930,9 @@ public class ProposalUtil {
         break;
       }
       case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
+        if (forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+          throw new ContractValidateException(BAD_PARAM_ID);
+        }
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_2)) {
           throw new ContractValidateException(
               "Bad chain parameter id [ALLOW_HARDEN_EXCHANGE_CALCULATION]");
@@ -938,6 +945,22 @@ public class ProposalUtil {
           throw new ContractValidateException(
               "[ALLOW_HARDEN_EXCHANGE_CALCULATION] has been set to " + value
                   + ", no need to propose again");
+        }
+        break;
+      }
+      case CLOSE_EXCHANGE: {
+        if (!forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+          throw new ContractValidateException("Bad chain parameter id [CLOSE_EXCHANGE].");
+        }
+        int current = dynamicPropertiesStore.getCloseExchange();
+        // Irreversible by design: CLOSE_EXCHANGE only advances one level at a time.
+        if (value == current) {
+          throw new ContractValidateException(
+              "[CLOSE_EXCHANGE] has been set to " + value + ", no need to propose again");
+        }
+        if (value != current + 1 || value < 1 || value > 2) {
+          throw new ContractValidateException(
+              "This value[CLOSE_EXCHANGE] must be " + (current + 1) + " and within [1,2]");
         }
         break;
       }
@@ -1029,7 +1052,8 @@ public class ProposalUtil {
     ALLOW_TVM_PRAGUE(95), // 0, 1
     ALLOW_TVM_OSAKA(96), // 0, 1
     ALLOW_HARDEN_RESOURCE_CALCULATION(97), // 0, 1
-    ALLOW_HARDEN_EXCHANGE_CALCULATION(98); // 0, 1
+    ALLOW_HARDEN_EXCHANGE_CALCULATION(98), // 0, 1
+    CLOSE_EXCHANGE(99); // 0, 1, 2
     private long code;
 
     ProposalType(long code) {

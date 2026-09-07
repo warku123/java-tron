@@ -96,6 +96,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
   //This value should be not negative
   private static final byte[] TOTAL_SHIELDED_POOL_VALUE = "TOTAL_SHIELDED_POOL_VALUE".getBytes();
   private static final byte[] EXCHANGE_CREATE_FEE = "EXCHANGE_CREATE_FEE".getBytes();
+  private static final byte[] CLOSE_EXCHANGE = "CLOSE_EXCHANGE".getBytes();
   private static final byte[] EXCHANGE_BALANCE_LIMIT = "EXCHANGE_BALANCE_LIMIT".getBytes();
   private static final byte[] TOTAL_TRANSACTION_COST = "TOTAL_TRANSACTION_COST".getBytes();
   private static final byte[] TOTAL_CREATE_ACCOUNT_COST = "TOTAL_CREATE_ACCOUNT_COST".getBytes();
@@ -1626,6 +1627,18 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
         .map(ByteArray::toLong)
         .orElseThrow(
             () -> new IllegalArgumentException("not found EXCHANGE_CREATE_FEE"));
+  }
+
+  public void saveCloseExchange(int level) {
+    this.put(CLOSE_EXCHANGE, new BytesCapsule(ByteArray.fromLong(level)));
+  }
+
+  public int getCloseExchange() {
+    return Optional.ofNullable(getUnchecked(CLOSE_EXCHANGE))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(0L)
+        .intValue();
   }
 
   public void saveExchangeBalanceLimit(long limit) {
