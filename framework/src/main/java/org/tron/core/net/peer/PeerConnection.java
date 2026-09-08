@@ -94,7 +94,6 @@ public class PeerConnection {
   @Getter
   private volatile long blockRcvTime;
 
-  @Getter
   private volatile long fetchLatency;
 
   private volatile boolean fetchLatencySeeded;
@@ -192,23 +191,45 @@ public class PeerConnection {
   }
 
   /**
-   * Updates the bounded fetch latency estimator with channel-latency initialization/fallback.
-   * The first measured fetch latency is intentionally blended with the channel estimate because
-   * the first fetch is often the slowest and the RTT prior is more robust against outliers.
-   * A single fetch worker reads this value while the channel event loop writes it; volatile is
-   * sufficient for this benign race and no lock should be added.
+   * Bounded fetch latency estimator with an explicit unsampled state.
+   *
+   * <p>The channel's average latency is never part of the sample sequence; it is only a
+   * read fallback while the estimator is unsampled (see {@link #getFetchLatency()}). The
+   * first measured fetch latency directly replaces the unsampled state (isomorphic to
+   * RFC 6298 SRTT initialization), and subsequent samples are blended with an EWMA of
+   * alpha = 0.1. With integer division the EWMA has a fixed point, e.g.
+   * (499 * 9 + 500) / 10 = 499, which damps jitter around the saturation bound.
+   *
+   * <p>A single fetch worker reads this value while the channel event loop writes it;
+   * volatile is sufficient for this benign race and no lock should be added.
    *
    * @param latencyMillis measured fetch latency in milliseconds
    */
   public void updateFetchLatency(long latencyMillis) {
     if (!fetchLatencySeeded) {
-      fetchLatency = channel.getAvgLatency();
+      fetchLatency = clampFetchLatency(latencyMillis);
       fetchLatencySeeded = true;
+    } else {
+      fetchLatency = clampFetchLatency((fetchLatency * 9 + latencyMillis) / 10);
     }
-    fetchLatency = (fetchLatency * 9 + latencyMillis) / 10;
+  }
+
+  /**
+   * Returns the bounded fetch latency estimate. While the estimator has not observed a
+   * real fetch sample yet, the channel's average latency is returned as a read fallback
+   * (an unknown peer is treated via its transport-level estimate instead of 0).
+   */
+  public long getFetchLatency() {
+    if (!fetchLatencySeeded) {
+      return channel.getAvgLatency();
+    }
+    return fetchLatency;
+  }
+
+  private long clampFetchLatency(long latency) {
     // Saturation intentionally makes the >= timeout gate in FetchBlockService trigger.
-    fetchLatency = StrictMathWrapper.max(0,
-        StrictMathWrapper.min(CommonParameter.getInstance().fetchBlockTimeout, fetchLatency));
+    return StrictMathWrapper.max(0,
+        StrictMathWrapper.min(CommonParameter.getInstance().fetchBlockTimeout, latency));
   }
 
   public void setBlockBothHave(BlockId blockId) {
