@@ -198,8 +198,9 @@ public class FetchBlockServiceTest extends BaseMethodTest {
   }
 
   /**
-   * When the old peer is unseeded, its fetch latency is 0 and the candidate latency is 144
-   * ((50 * 9 + 999) / 10), so failover must not happen while the fetch is still within timeout.
+   * Old peer unsampled: getFetchLatency() falls back to its channel avgLatency (0), while
+   * the candidate's first real sample 999 clamps to 500. shouldFetchBlock: left time
+   * 0 - 0 = 0, so 500 < 0 * 0.5 = 0 is false — no failover while the fetch is within timeout.
    */
   @Test
   public void testNoSwitchWhenOldPeerLatencyUnknown() throws Exception {
@@ -224,6 +225,7 @@ public class FetchBlockServiceTest extends BaseMethodTest {
 
     PeerConnection newPeer = context.getBean(PeerConnection.class);
     newPeer.setChannel(newChannel);
+    // first real sample replaces the unsampled state, then clamps 999 to 500
     newPeer.updateFetchLatency(999L);
 
     Sha256Hash hash = Sha256Hash.wrap(ByteString.copyFrom(new byte[32]));
@@ -258,10 +260,12 @@ public class FetchBlockServiceTest extends BaseMethodTest {
   }
 
   /**
-   * Both peers are unseeded, so zero latency suppresses failover.
+   * Both peers are unsampled, so both reads fall back to their channel avgLatency
+   * (old = 200, candidate = 0). The candidate wins min() and shouldFetchBlock:
+   * left time 200 - 0 = 200, so 0 < 200 * 0.5 = 100 holds — failover happens.
    */
   @Test
-  public void testNoSwitchWhenBothPeersUnseeded() throws Exception {
+  public void testSwitchWhenBothPeersUnseededReadsChannelFallback() throws Exception {
     InetSocketAddress oldAddr = new InetSocketAddress("127.0.0.7", 10001);
     InetSocketAddress newAddr = new InetSocketAddress("127.0.0.8", 10001);
 
@@ -274,7 +278,7 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     Channel newChannel = mock(Channel.class);
     when(newChannel.getInetSocketAddress()).thenReturn(newAddr);
     when(newChannel.getInetAddress()).thenReturn(newAddr.getAddress());
-    // candidate remains unseeded, so its fetch latency is zero
+    // candidate unsampled: read falls back to its channel avgLatency (0)
     when(newChannel.getAvgLatency()).thenReturn(0L);
     doNothing().when(newChannel).send(any(byte[].class));
 
@@ -308,11 +312,15 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     method.setAccessible(true);
     method.invoke(service, fetchBlockInfo);
 
-    // no failover: both unseeded latencies are zero
-    verify(newChannel, never()).send(any(byte[].class));
-    Assert.assertNotNull(ReflectUtils.getFieldObject(service, "fetchBlockInfo"));
+    // failover: unsampled candidate reads channel fallback 0 and wins the comparison
+    verify(newChannel).send(any(byte[].class));
+    Assert.assertNull(ReflectUtils.getFieldObject(service, "fetchBlockInfo"));
   }
 
+  /**
+   * Old peer seeded at 200; the unsampled candidate reads its channel fallback (0), wins
+   * min() and the left-time comparison (0 < 200 * 0.5) — failover to the candidate.
+   */
   @Test
   public void testSwitchToUnseededCandidateWhenOldPeerSeeded() throws Exception {
     PeerConnection oldPeer = context.getBean(PeerConnection.class);
@@ -346,17 +354,22 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     Assert.assertNull(ReflectUtils.getFieldObject(service, "fetchBlockInfo"));
   }
 
+  /**
+   * The first real fetch sample directly replaces the unsampled state (no blending with
+   * the channel prior, isomorphic to RFC 6298 SRTT initialization); the clamp still
+   * applies, so 999 saturates to the 500ms bound instead of the old blended (123*9+999)/10.
+   */
   @Test
-  public void testFirstFetchLatencySampleSeedsFromChannel() {
+  public void testFirstFetchLatencySampleReplacesSeed() {
     Channel channel = mock(Channel.class);
     when(channel.getAvgLatency()).thenReturn(123L);
     PeerConnection peer = new PeerConnection();
     ReflectUtils.setFieldValue(peer, "channel", channel);
 
-    // First call blends channel prior with measured fetch sample.
+    // First real sample replaces the unsampled state; channel prior (123) is not blended.
     peer.updateFetchLatency(999L);
 
-    Assert.assertEquals((123L * 9 + 999L) / 10, peer.getFetchLatency());
+    Assert.assertEquals(500L, peer.getFetchLatency());
   }
 
   @Test
@@ -366,7 +379,9 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     PeerConnection peer = new PeerConnection();
     ReflectUtils.setFieldValue(peer, "channel", channel);
 
+    // first real sample initializes directly: clamp(100) = 100
     peer.updateFetchLatency(100L);
+    // second sample onwards: EWMA alpha = 0.1 → (100 * 9 + 200) / 10 = 110
     peer.updateFetchLatency(200L);
 
     Assert.assertEquals(110L, peer.getFetchLatency());
@@ -379,7 +394,9 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     PeerConnection peer = new PeerConnection();
     ReflectUtils.setFieldValue(peer, "channel", channel);
 
+    // first real sample initializes directly: clamp(100) = 100
     peer.updateFetchLatency(100L);
+    // EWMA: (100 * 9 + 9999) / 10 = 1089, then clamped to the 500ms bound
     peer.updateFetchLatency(9999L);
 
     Assert.assertEquals(500L, peer.getFetchLatency());
@@ -398,6 +415,8 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     PeerConnection second = new PeerConnection();
     ReflectUtils.setFieldValue(second, "channel", secondChannel);
 
-    Assert.assertEquals(0L, second.getFetchLatency());
+    // the fresh connection is unsampled: it reads its own channel fallback (50),
+    // not the first connection's estimate (500) and not a cross-connection value
+    Assert.assertEquals(50L, second.getFetchLatency());
   }
 }
