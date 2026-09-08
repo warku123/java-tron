@@ -19,6 +19,9 @@ class MetricsCounter {
     init(MetricKeys.Counter.P2P_DISCONNECT, "tron p2p disconnect .", "type");
     init(MetricKeys.Counter.INTERNAL_SERVICE_FAIL, "internal Service fail.",
         "class", "method");
+    init(MetricKeys.Counter.BLOCK_FETCH_SECONDARY,
+        "secondary fetch requests issued by the fetch-block failover estimator.");
+    init(MetricKeys.Counter.BLOCK_DUPLICATE, "duplicate blocks received from peers.");
   }
 
   private MetricsCounter() {

@@ -13,6 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
@@ -104,6 +106,7 @@ public class FetchBlockService {
             && firstPeer.checkAndPutAdvInvRequest(item, System.currentTimeMillis())) {
           firstPeer.sendMessage(new FetchInvDataMessage(Collections.singletonList(item.getHash()),
               item.getType()));
+          Metrics.counterInc(MetricKeys.Counter.BLOCK_FETCH_SECONDARY, 1);
           this.fetchBlockInfo = null;
         }
       });

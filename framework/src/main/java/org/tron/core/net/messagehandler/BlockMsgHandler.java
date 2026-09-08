@@ -141,6 +141,7 @@ public class BlockMsgHandler implements TronMsgHandler {
 
     long headNum = tronNetDelegate.getHeadBlockId().getNum();
     if (block.getNum() < headNum) {
+      Metrics.counterInc(MetricKeys.Counter.BLOCK_DUPLICATE, 1);
       logger.warn("Receive a low block {}, head {}", blockId.getString(), headNum);
       return;
     }
