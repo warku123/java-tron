@@ -61,7 +61,8 @@ public class FullNode {
     Application appT = ApplicationFactory.create(context);
     context.registerShutdownHook();
     appT.startup();
-    // chainId is only available after the context refresh (Manager.initGenesis)
+    // the genesis block id (chainId) is only available after the context refresh
+    // (Manager.initGenesis)
     Metrics.info(MetricKeys.Info.NODE_INFO, Version.getVersion(),
         Args.getInstance().getChainId());
     if (parameter.isSolidityNode()) {
