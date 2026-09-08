@@ -52,6 +52,11 @@ public class FullNode {
     // init metrics first
     Metrics.init();
 
+    if (parameter.isNodeMetricsEnable()) {
+      logger.warn("legacy metrics stack (node.metricsEnable) is deprecated and will be "
+          + "removed in a future major release; migrate to node.metrics.prometheus.enable");
+    }
+
     DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
     beanFactory.setAllowCircularReferences(false);
     TronApplicationContext context =
