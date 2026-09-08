@@ -97,7 +97,8 @@ public class FetchBlockService {
         .filter(PeerConnection::isIdle)
         .filter(filterPeer -> !filterPeer.equals(fetchBlock.getPeer()))
         .filter(filterPeer -> filterPeer.getAdvInvReceive().getIfPresent(item) != null)
-        // Clamping bounds latency by timeout; min() ordering handles candidate selection.
+        // Seeded estimates are clamped to the fetch timeout; the unseeded channel-latency
+        // fallback is not, but min() ordering and the saturation gate keep it safe.
         .min(Comparator.comparingDouble(this::getPeerLatency));
 
     if (optionalPeerConnection.isPresent()) {
