@@ -144,6 +144,10 @@ public class BlockMsgHandler implements TronMsgHandler {
 
     long headNum = tronNetDelegate.getHeadBlockId().getNum();
     if (block.getNum() < headNum) {
+      // Best-effort signal: counts received blocks already known (block num < head);
+      // includes responses to secondary fetches and concurrent/redundant arrivals;
+      // cannot attribute specifically to a secondary fetch.
+      Metrics.counterInc(MetricKeys.Counter.BLOCK_ALREADY_KNOWN, 1);
       logger.warn("Receive a low block {}, head {}", blockId.getString(), headNum);
       return;
     }
