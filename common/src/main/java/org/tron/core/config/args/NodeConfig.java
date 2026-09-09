@@ -373,6 +373,23 @@ public class NodeConfig {
       rpc.maxConcurrentCallsPerConnection =
           RpcConfig.DEFAULT_MAX_CONCURRENT_CALLS_PER_CONNECTION;
     }
+    // node.rpc.maxRstStream and node.rpc.secondsPerWindow only take effect
+    // together (RpcService applies RST limiting only when both are > 0), so a
+    // half-configured pair would silently disable RST_STREAM flood
+    // protection — fail fast instead.
+    if (rpc.maxRstStream < 0 || rpc.secondsPerWindow < 0) {
+      throw new TronError("node.rpc.maxRstStream and node.rpc.secondsPerWindow "
+          + "must be non-negative, got: maxRstStream=" + rpc.maxRstStream
+          + ", secondsPerWindow=" + rpc.secondsPerWindow, PARAMETER_INIT);
+    }
+    if ((rpc.maxRstStream > 0) != (rpc.secondsPerWindow > 0)) {
+      throw new TronError("node.rpc.maxRstStream and node.rpc.secondsPerWindow "
+          + "must be configured together: exactly one of them is set while the "
+          + "other is 0, which would silently disable RST_STREAM flood "
+          + "protection. Set both to positive values, or leave both at 0 to "
+          + "disable the limit (got: maxRstStream=" + rpc.maxRstStream
+          + ", secondsPerWindow=" + rpc.secondsPerWindow + ")", PARAMETER_INIT);
+    }
     if (rpc.maxConnectionIdleInMillis == 0) {
       rpc.maxConnectionIdleInMillis = Long.MAX_VALUE;
     }
