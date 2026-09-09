@@ -387,6 +387,63 @@ public class FetchBlockServiceTest extends BaseMethodTest {
     Assert.assertEquals(110L, peer.getFetchLatency());
   }
 
+  /**
+   * Degradation: seeded at 100 (direct replacement), then ten 500ms samples. With
+   * alpha = 0.1 and integer division the estimate rises monotonically while converging
+   * smoothly and never exceeds the 500ms clamp bound. Hand-computed sequence:
+   * 140, 176, 208, 237, 263, 286, 307, 326, 343, 358.
+   */
+  @Test
+  public void testFetchLatencyEwmaDegradationConverges() {
+    Channel channel = mock(Channel.class);
+    when(channel.getAvgLatency()).thenReturn(0L);
+    PeerConnection peer = new PeerConnection();
+    ReflectUtils.setFieldValue(peer, "channel", channel);
+
+    // first real sample initializes directly: clamp(100) = 100
+    peer.updateFetchLatency(100L);
+    long previous = peer.getFetchLatency();
+    long[] expected = {140, 176, 208, 237, 263, 286, 307, 326, 343, 358};
+    for (long expectedValue : expected) {
+      peer.updateFetchLatency(500L);
+      long current = peer.getFetchLatency();
+      Assert.assertEquals(expectedValue, current);
+      Assert.assertTrue(current > previous);
+      Assert.assertTrue(current <= 500L);
+      previous = current;
+    }
+  }
+
+  /**
+   * Recovery: continuing from the degradation endpoint (358), ten 100ms samples pull the
+   * estimate back down monotonically and smoothly. Hand-computed sequence:
+   * 332, 308, 287, 268, 251, 235, 221, 208, 197, 187.
+   */
+  @Test
+  public void testFetchLatencyEwmaRecoveryConverges() {
+    Channel channel = mock(Channel.class);
+    when(channel.getAvgLatency()).thenReturn(0L);
+    PeerConnection peer = new PeerConnection();
+    ReflectUtils.setFieldValue(peer, "channel", channel);
+
+    // replay the degradation phase to reach its endpoint
+    peer.updateFetchLatency(100L);
+    for (int i = 0; i < 10; i++) {
+      peer.updateFetchLatency(500L);
+    }
+    Assert.assertEquals(358L, peer.getFetchLatency());
+
+    long previous = peer.getFetchLatency();
+    long[] expected = {332, 308, 287, 268, 251, 235, 221, 208, 197, 187};
+    for (long expectedValue : expected) {
+      peer.updateFetchLatency(100L);
+      long current = peer.getFetchLatency();
+      Assert.assertEquals(expectedValue, current);
+      Assert.assertTrue(current < previous);
+      previous = current;
+    }
+  }
+
   @Test
   public void testFetchLatencyIsClamped() {
     Channel channel = mock(Channel.class);

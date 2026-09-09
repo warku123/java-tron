@@ -94,6 +94,17 @@ public class PeerConnection {
   @Getter
   private volatile long blockRcvTime;
 
+  /**
+   * EWMA smoothing divisor for the fetch latency estimator: the previous estimate is
+   * weighted (EWMA_DIVISOR - 1) / EWMA_DIVISOR and the new sample 1 / EWMA_DIVISOR,
+   * i.e. alpha = 0.1. This trades off smoothing against responsiveness and sits in the
+   * same order of magnitude as TCP's SRTT gain (1/8, RFC 6298). Under a large
+   * degradation the relative ordering of two peers can flip within 1-2 samples, while
+   * the absolute value converges smoothly (e.g. seeded at 100, ten 500ms samples walk
+   * 140, 176, 208, 237, 263, 286, 307, 326, 343, 358 without ever hitting the clamp).
+   */
+  private static final int EWMA_DIVISOR = 10;
+
   private volatile long fetchLatency;
 
   private volatile boolean fetchLatencySeeded;
@@ -197,7 +208,7 @@ public class PeerConnection {
    * read fallback while the estimator is unsampled (see {@link #getFetchLatency()}). The
    * first measured fetch latency directly replaces the unsampled state (isomorphic to
    * RFC 6298 SRTT initialization), and subsequent samples are blended with an EWMA of
-   * alpha = 0.1. With integer division the EWMA has a fixed point, e.g.
+   * alpha = 1 / EWMA_DIVISOR = 0.1. With integer division the EWMA has a fixed point, e.g.
    * (499 * 9 + 500) / 10 = 499, which damps jitter around the saturation bound.
    *
    * <p>A single fetch worker reads this value while the channel event loop writes it;
@@ -210,7 +221,8 @@ public class PeerConnection {
       fetchLatency = clampFetchLatency(latencyMillis);
       fetchLatencySeeded = true;
     } else {
-      fetchLatency = clampFetchLatency((fetchLatency * 9 + latencyMillis) / 10);
+      fetchLatency = clampFetchLatency(
+          (fetchLatency * (EWMA_DIVISOR - 1) + latencyMillis) / EWMA_DIVISOR);
     }
   }
 
