@@ -2,6 +2,7 @@ package org.tron.keystore;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -9,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.tron.core.exception.TronError;
 
 /**
  * Verifies that {@link WalletUtils#inputPassword()} preserves the full
@@ -110,6 +112,35 @@ public class WalletUtilsInputPasswordTest {
 
     assertEquals("Full passphrase must survive the double-read path",
         "correct horse battery staple", pw);
+  }
+
+  // ---------- EOF fail-fast tests ----------
+
+  @Test(timeout = 5000)
+  public void testInputPasswordTtyConsoleEofThrowsTronError() {
+    // TTY branch: the console reader returns null on EOF (e.g. Ctrl+D).
+    // Previously this crashed with a raw NullPointerException from
+    // String.valueOf((char[]) null); it must fail fast with TronError.
+    // Exercises the package-private Supplier<char[]> seam directly — no
+    // Console mock needed (mocking java.io.Console is slow under JaCoCo
+    // instrumentation and can exceed the test timeout).
+    TronError err = assertThrows(TronError.class,
+        () -> WalletUtils.inputPassword(() -> null));
+
+    assertEquals("Console EOF must map to the keystore-load error code",
+        TronError.ErrCode.WITNESS_KEYSTORE_LOAD, err.getErrCode());
+  }
+
+  @Test(timeout = 5000)
+  public void testInputPasswordPipedStdinEofThrowsTronError() {
+    // Non-TTY branch: Scanner.nextLine() throws NoSuchElementException at
+    // EOF; it must be translated into a fail-fast TronError.
+    System.setIn(new ByteArrayInputStream(new byte[0]));
+
+    TronError err = assertThrows(TronError.class, WalletUtils::inputPassword);
+
+    assertEquals("Piped stdin EOF must map to the keystore-load error code",
+        TronError.ErrCode.WITNESS_KEYSTORE_LOAD, err.getErrCode());
   }
 
   // ---------- stripPasswordLine() direct unit tests (M3) ----------

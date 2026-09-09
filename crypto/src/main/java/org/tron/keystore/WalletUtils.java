@@ -19,12 +19,14 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.NoSuchElementException;
 import java.util.Scanner;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.tron.common.crypto.SignInterface;
 import org.tron.core.exception.CipherException;
+import org.tron.core.exception.TronError;
 
 /**
  * Utility functions for working with Wallet files.
@@ -226,23 +228,66 @@ public class WalletUtils {
     return sharedStdinScanner;
   }
 
+  /**
+   * Reads a password from the interactive console (TTY) or from piped
+   * stdin when no console is attached.
+   *
+   * <p>Fails fast with {@link TronError} (exit code
+   * {@link TronError.ErrCode#WITNESS_KEYSTORE_LOAD}) when the password
+   * source closes before a line is available (EOF, e.g. Ctrl+D on a TTY
+   * or an exhausted pipe), instead of crashing with a raw
+   * {@link NullPointerException} or {@link NoSuchElementException}.
+   */
   public static String inputPassword() {
-    String password;
     Console cons = System.console();
-    Scanner in = cons == null ? getSharedStdinScanner() : null;
+    if (cons != null) {
+      return inputPassword(() -> cons.readPassword("password: "));
+    }
+    String password;
+    Scanner in = getSharedStdinScanner();
     while (true) {
-      if (cons != null) {
-        char[] pwd = cons.readPassword("password: ");
-        password = String.valueOf(pwd);
-      } else {
-        // Preserve the full password including embedded whitespace.
-        // The previous implementation applied trim() + split("\\s+")[0]
-        // which silently truncated passwords like "correct horse battery
-        // staple" to "correct" when piped via stdin (e.g. echo ... | java).
-        // stripPasswordLine only removes the UTF-8 BOM and trailing line
-        // terminators — internal whitespace is part of the password.
-        password = stripPasswordLine(in.nextLine());
+      // Preserve the full password including embedded whitespace.
+      // The previous implementation applied trim() + split("\\s+")[0]
+      // which silently truncated passwords like "correct horse battery
+      // staple" to "correct" when piped via stdin (e.g. echo ... | java).
+      // stripPasswordLine only removes the UTF-8 BOM and trailing line
+      // terminators — internal whitespace is part of the password.
+      String line;
+      try {
+        line = in.nextLine();
+      } catch (NoSuchElementException e) {
+        // Piped stdin reached EOF before a password line was available.
+        // Fail fast instead of leaking a raw NoSuchElementException.
+        throw new TronError(
+            "password input closed (EOF): piped stdin provided no password "
+                + "line; restart with --password or provide an interactive TTY",
+            e, TronError.ErrCode.WITNESS_KEYSTORE_LOAD);
       }
+      password = stripPasswordLine(line);
+      if (passwordValid(password)) {
+        return password;
+      }
+      System.out.println("Invalid password, please input again.");
+    }
+  }
+
+  /**
+   * Visible for testing: the TTY read loop with an injected password
+   * reader (which cannot be reached under JUnit, where
+   * {@code System.console()} is always null).
+   */
+  static String inputPassword(java.util.function.Supplier<char[]> ttyReader) {
+    while (true) {
+      char[] pwd = ttyReader.get();
+      if (pwd == null) {
+        // Console reached EOF (e.g. Ctrl+D): String.valueOf((char[]) null)
+        // would throw a raw NullPointerException. Fail fast instead.
+        throw new TronError(
+            "password input closed (EOF) while reading from the console; "
+                + "restart with --password or provide an interactive TTY",
+            TronError.ErrCode.WITNESS_KEYSTORE_LOAD);
+      }
+      String password = String.valueOf(pwd);
       if (passwordValid(password)) {
         return password;
       }
