@@ -107,8 +107,8 @@ public class NodeConfigTest {
     assertEquals(NodeConfig.RpcConfig.DEFAULT_MAX_CONCURRENT_CALLS_PER_CONNECTION,
         rpc.getMaxConcurrentCallsPerConnection());
     assertEquals(1048576, rpc.getFlowControlWindow());
-    // 60s defaults per gRPC keepalive/connection-lifecycle best practice;
-    // explicit 0 still maps to Long.MAX_VALUE (unlimited) in postProcess.
+    // reference.conf keeps 0 (the default marker); postProcess converts 0 to
+    // the secure built-in 60s default, so the effective default is 60s.
     assertEquals(60000L, rpc.getMaxConnectionIdleInMillis());
     assertEquals(60000L, rpc.getMaxConnectionAgeInMillis());
     assertEquals(4194304, rpc.getMaxMessageSize());
@@ -149,14 +149,17 @@ public class NodeConfigTest {
   }
 
   @Test
-  public void testRpcExplicitZeroIdleAndAgeMeansUnlimited() {
-    // Explicit 0 = unlimited: postProcess converts 0 -> Long.MAX_VALUE so
-    // operators can still opt out of the 60s connection defaults.
+  public void testRpcExplicitZeroIdleAndAgeFallsBackToSecureDefault() {
+    // Explicit 0 no longer means unlimited: postProcess converts 0 to the
+    // secure built-in 60s default. Operators wanting a longer lifetime must
+    // set an explicit positive value.
     Config config = withRef(
         "node { rpc { maxConnectionIdleInMillis = 0, maxConnectionAgeInMillis = 0 } }");
     NodeConfig nc = NodeConfig.fromConfig(config);
-    assertEquals(Long.MAX_VALUE, nc.getRpc().getMaxConnectionIdleInMillis());
-    assertEquals(Long.MAX_VALUE, nc.getRpc().getMaxConnectionAgeInMillis());
+    assertEquals(NodeConfig.RpcConfig.DEFAULT_MAX_CONNECTION_LIFETIME_IN_MILLIS,
+        nc.getRpc().getMaxConnectionIdleInMillis());
+    assertEquals(NodeConfig.RpcConfig.DEFAULT_MAX_CONNECTION_LIFETIME_IN_MILLIS,
+        nc.getRpc().getMaxConnectionAgeInMillis());
   }
 
   // ----- maxRstStream / secondsPerWindow: must be configured together -----

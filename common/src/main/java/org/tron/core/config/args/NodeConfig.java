@@ -208,6 +208,9 @@ public class NodeConfig {
   public static class RpcConfig {
 
     public static final int DEFAULT_MAX_CONCURRENT_CALLS_PER_CONNECTION = 100;
+    // Secure built-in default for gRPC connection lifetime (idle & max age).
+    // Applied by postProcess() when the configured value is 0 (the default).
+    public static final long DEFAULT_MAX_CONNECTION_LIFETIME_IN_MILLIS = 60_000L;
 
     private boolean enable = true;
     private int port = 50051;
@@ -220,8 +223,8 @@ public class NodeConfig {
     private int maxConcurrentCallsPerConnection =
         DEFAULT_MAX_CONCURRENT_CALLS_PER_CONNECTION;
     private int flowControlWindow = 1048576;
-    private long maxConnectionIdleInMillis = 60000L;
-    private long maxConnectionAgeInMillis = 60000L;
+    private long maxConnectionIdleInMillis = 0;
+    private long maxConnectionAgeInMillis = 0;
     private int maxMessageSize = 4194304;
     private int maxHeaderListSize = 8192;
     private int maxRstStream = 0;
@@ -390,11 +393,15 @@ public class NodeConfig {
           + "disable the limit (got: maxRstStream=" + rpc.maxRstStream
           + ", secondsPerWindow=" + rpc.secondsPerWindow + ")", PARAMETER_INIT);
     }
+    // 0 (the default) means "use the secure built-in default" (60s), NOT
+    // unlimited: the old 0 -> Long.MAX_VALUE conversion silently turned an
+    // unset or explicitly-zero value into an unbounded connection lifetime.
+    // Operators who want a longer lifetime must set an explicit positive value.
     if (rpc.maxConnectionIdleInMillis == 0) {
-      rpc.maxConnectionIdleInMillis = Long.MAX_VALUE;
+      rpc.maxConnectionIdleInMillis = RpcConfig.DEFAULT_MAX_CONNECTION_LIFETIME_IN_MILLIS;
     }
     if (rpc.maxConnectionAgeInMillis == 0) {
-      rpc.maxConnectionAgeInMillis = Long.MAX_VALUE;
+      rpc.maxConnectionAgeInMillis = RpcConfig.DEFAULT_MAX_CONNECTION_LIFETIME_IN_MILLIS;
     }
 
     // validateSignThreadNum: 0 = auto-detect
