@@ -73,6 +73,7 @@ public class FetchBlockService {
         .findFirst().ifPresent(sha256Hash -> {
           long now = System.currentTimeMillis();
           fetchBlockInfo = new FetchBlockInfo(sha256Hash, peer, now);
+          Metrics.counterInc(MetricKeys.Counter.BLOCK_FETCH_ARMED, 1);
           logger.info("Set fetchBlockInfo, block: {}, peer: {}, time: {}", sha256Hash,
               peer.getInetAddress(), now);
         });
