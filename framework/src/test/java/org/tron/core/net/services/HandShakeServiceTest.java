@@ -19,7 +19,6 @@ import org.mockito.Mockito;
 import org.springframework.context.ApplicationContext;
 import org.tron.common.TestConstants;
 import org.tron.common.application.TronApplicationContext;
-import org.tron.common.utils.PeerManagerStateResetter;
 import org.tron.common.utils.ReflectUtils;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
@@ -53,7 +52,6 @@ public class HandShakeServiceTest {
 
   @BeforeClass
   public static void init() throws Exception {
-    PeerManagerStateResetter.reset();
     Args.setParam(new String[] {"--output-directory",
         temporaryFolder.newFolder().toString(), "--debug"}, TestConstants.TEST_CONF);
     context = new TronApplicationContext(DefaultConfig.class);

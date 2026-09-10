@@ -20,7 +20,6 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -149,8 +148,6 @@ public class ShieldedReceiveTest extends BaseTest {
   @Resource
   private DposSlot dposSlot;
 
-  private long previousAllowShieldedTransaction;
-
   private static boolean init;
 
   static {
@@ -169,8 +166,6 @@ public class ShieldedReceiveTest extends BaseTest {
    */
   @Before
   public void init() {
-    previousAllowShieldedTransaction = chainBaseManager.getDynamicPropertiesStore()
-        .getAllowShieldedTransaction();
     if (init) {
       return;
     }
@@ -180,12 +175,6 @@ public class ShieldedReceiveTest extends BaseTest {
     dposTask.stop();
     chainBaseManager.getDynamicPropertiesStore().saveTotalShieldedPoolValue(10_000_000_000L);
     init = true;
-  }
-
-  @After
-  public void restoreAllowShieldedTransaction() {
-    chainBaseManager.getDynamicPropertiesStore()
-        .saveAllowShieldedTransaction(previousAllowShieldedTransaction);
   }
 
   private static byte[] randomUint256() {
