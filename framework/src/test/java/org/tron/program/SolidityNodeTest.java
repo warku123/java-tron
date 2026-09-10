@@ -15,6 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
@@ -79,41 +80,53 @@ public class SolidityNodeTest extends BaseTest {
   // ── gRPC / HTTP service integration ──────────────────────────────────────────
 
   @Test
-  public void testSolidityGrpcCall() {
-    rpcApiService.start();
-    DatabaseGrpcClient databaseGrpcClient = null;
-    String address = Args.getInstance().getTrustNodeAddr().split(":")[0] + ":" + rpcPort;
+  public void testSolidityGrpcCall() throws Exception {
+    DatabaseGrpcClient client = null;
+    DatabaseGrpcClient addressedClient = null;
     try {
-      databaseGrpcClient = new DatabaseGrpcClient(address);
-    } catch (Exception e) {
-      logger.error("Failed to create database grpc client {}", address);
+      Assert.assertTrue(rpcApiService.start().get(5, TimeUnit.SECONDS));
+      String address = "127.0.0.1:" + rpcPort;
+      client = new DatabaseGrpcClient(address);
+      Assert.assertNotNull(client.getDynamicProperties());
+      Block genesisBlock = client.getBlock(0);
+      Assert.assertNotNull(genesisBlock);
+      Assert.assertFalse(genesisBlock.getTransactionsList().isEmpty());
+      Assert.assertNotNull(client.getBlock(-1));
+      addressedClient = new DatabaseGrpcClient("127.0.0.1", rpcPort);
+      Assert.assertNotNull(addressedClient.getDynamicProperties());
+    } finally {
+      try {
+        shutdownDatabaseClient(client);
+      } finally {
+        try {
+          shutdownDatabaseClient(addressedClient);
+        } finally {
+          Assert.assertTrue(rpcApiService.stop().get(5, TimeUnit.SECONDS));
+        }
+      }
     }
+  }
 
-    Assert.assertNotNull(databaseGrpcClient);
-    DynamicProperties dynamicProperties = databaseGrpcClient.getDynamicProperties();
-    Assert.assertNotNull(dynamicProperties);
-
-    Block genesisBlock = databaseGrpcClient.getBlock(0);
-    Assert.assertNotNull(genesisBlock);
-    Assert.assertFalse(genesisBlock.getTransactionsList().isEmpty());
-    Block invalidBlock = databaseGrpcClient.getBlock(-1);
-    Assert.assertNotNull(invalidBlock);
-    try {
-      databaseGrpcClient = new DatabaseGrpcClient(address, -1);
-    } catch (Exception e) {
-      logger.error("Failed to create database grpc client {}", address);
+  private void shutdownDatabaseClient(DatabaseGrpcClient client) throws Exception {
+    if (client != null) {
+      client.shutdown();
+      Field channel = DatabaseGrpcClient.class.getDeclaredField("channel");
+      channel.setAccessible(true);
+      Assert.assertTrue("Database channel did not terminate",
+          ((io.grpc.ManagedChannel) channel.get(client)).awaitTermination(5, TimeUnit.SECONDS));
     }
-    databaseGrpcClient.shutdown();
-    rpcApiService.stop();
   }
 
   @Test
-  public void testSolidityNodeHttpApiService() {
-    solidityNodeHttpApiService.start();
-    // start again
-    solidityNodeHttpApiService.start();
-    solidityNodeHttpApiService.stop();
-    Assert.assertTrue(true);
+  public void testSolidityNodeHttpApiService() throws Exception {
+    // HttpService creates a new Jetty server on start; stop each instance before restarting.
+    for (int i = 0; i < 2; i++) {
+      try {
+        Assert.assertTrue(solidityNodeHttpApiService.start().get(5, TimeUnit.SECONDS));
+      } finally {
+        Assert.assertTrue(solidityNodeHttpApiService.stop().get(5, TimeUnit.SECONDS));
+      }
+    }
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────────
@@ -330,45 +343,28 @@ public class SolidityNodeTest extends BaseTest {
     }
   }
 
-  /**
-   * getBlockByNum() must break immediately — without a 1-second sleep — when a
-   * gRPC exception is thrown while flag races to false (the P3 shutdown-race fix).
-   * The invocation time is measured directly so the assertion is independent of
-   * Spring-context startup overhead.
-   */
+  /** Verify shutdown skips the retry sleep without relying on CI scheduling latency. */
   @Test(timeout = 5000)
   public void testGetBlockByNumNoErrorOnExceptionDuringShutdown() throws Exception {
-    Method m = SolidityNode.class.getDeclaredMethod("getBlockByNum", long.class);
-    m.setAccessible(true);
-    Field clientField = getField("databaseGrpcClient");
-    Object origClient = clientField.get(solidityNode);
-    setFlag(true); // precondition: while(flag) must be entered; do not rely on test-ordering
-    try {
-      DatabaseGrpcClient mockClient = mock(DatabaseGrpcClient.class);
-      // flag races to false inside the gRPC call — exact close() race
-      Mockito.when(mockClient.getBlock(42L)).thenAnswer(inv -> {
-        setFlag(false);
-        throw new RuntimeException("channel closed during shutdown");
-      });
-      clientField.set(solidityNode, mockClient);
+    SolidityNode observed = Mockito.spy(solidityNode);
+    Field flag = getField("flag");
+    flag.set(observed, true);
+    DatabaseGrpcClient client = mock(DatabaseGrpcClient.class);
+    Mockito.when(client.getBlock(42L)).thenAnswer(invocation -> {
+      flag.set(observed, false);
+      throw new RuntimeException("channel closed during shutdown");
+    });
+    getField("databaseGrpcClient").set(observed, client);
+    Mockito.doNothing().when(observed).sleep(Mockito.anyLong());
+    Method method = SolidityNode.class.getDeclaredMethod("getBlockByNum", long.class);
+    method.setAccessible(true);
 
-      long start = System.currentTimeMillis();
-      InvocationTargetException t = assertThrows(InvocationTargetException.class, () -> {
-        m.invoke(solidityNode, 42L);
-      });
-      assertTrue(t.getCause() instanceof RuntimeException);
-      assertEquals("SolidityNode is closing.", t.getCause().getMessage());
-      long elapsed = System.currentTimeMillis() - start;
-      // Without the fix the catch sleeps exceptionSleepTime (1000 ms) before
-      // re-checking the while condition. With the fix it breaks immediately.
-      assertTrue("Expected break without sleep (<500 ms), got " + elapsed + " ms",
-          elapsed < 500);
-      // No retry: exactly one gRPC call must be made.
-      Mockito.verify(mockClient, Mockito.times(1)).getBlock(42L);
-    } finally {
-      setFlag(true);
-      clientField.set(solidityNode, origClient);
-    }
+    InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+        () -> method.invoke(observed, 42L));
+    assertTrue(failure.getCause() instanceof RuntimeException);
+    assertEquals("SolidityNode is closing.", failure.getCause().getMessage());
+    Mockito.verify(observed, Mockito.never()).sleep(Mockito.anyLong());
+    Mockito.verify(client).getBlock(42L);
   }
 
   // ── getLastSolidityBlockNum() ─────────────────────────────────────────────────
@@ -584,11 +580,12 @@ public class SolidityNodeTest extends BaseTest {
 
       Method getBlockM = SolidityNode.class.getDeclaredMethod("getBlock");
       getBlockM.setAccessible(true);
+      AtomicReference<Throwable> workerFailure = new AtomicReference<>();
       Thread t = new Thread(() -> {
         try {
           getBlockM.invoke(solidityNode);
         } catch (Exception e) {
-          Thread.currentThread().interrupt();
+          workerFailure.set(e);
         }
       });
       t.start();
@@ -596,6 +593,7 @@ public class SolidityNodeTest extends BaseTest {
       t.interrupt();     // simulate ExecutorService.shutdownNow()
       t.join(4000);
       assertFalse("getBlock must exit cleanly when interrupted during put()", t.isAlive());
+      Assert.assertNull("getBlock worker failed", workerFailure.get());
       queue.clear();
       setFlag(true);
 
@@ -679,11 +677,12 @@ public class SolidityNodeTest extends BaseTest {
 
     Method m = SolidityNode.class.getDeclaredMethod("processSolidityBlock");
     m.setAccessible(true);
+    AtomicReference<Throwable> workerFailure = new AtomicReference<>();
     Thread t = new Thread(() -> {
       try {
         m.invoke(solidityNode);
-      } catch (Exception ignored) {
-        // InvocationTargetException should not happen; the method handles interrupt internally
+      } catch (Exception e) {
+        workerFailure.set(e);
       }
     });
     try {
@@ -692,6 +691,7 @@ public class SolidityNodeTest extends BaseTest {
       t.interrupt();
       t.join(5000);
       assertFalse("processSolidityBlock must exit after interrupt", t.isAlive());
+      Assert.assertNull("processSolidityBlock worker failed", workerFailure.get());
     } finally {
       setFlag(true);
       delegateField.set(solidityNode, origDelegate);

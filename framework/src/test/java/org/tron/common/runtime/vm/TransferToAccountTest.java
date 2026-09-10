@@ -3,7 +3,6 @@ package org.tron.common.runtime.vm;
 import com.google.protobuf.ByteString;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -74,11 +73,6 @@ public class TransferToAccountTest extends BaseTest {
             AccountType.AssetIssue);
 
     ownerCapsule.setBalance(1000_1000_1000L);
-  }
-
-  @After
-  public void clearVmThreadLocal() {
-    VMConfig.clearLocalSnapshot();
   }
 
   private long createAsset(String tokenName) {
@@ -264,12 +258,26 @@ public class TransferToAccountTest extends BaseTest {
 
     VMActuator vmActuator = new VMActuator(true);
 
-    vmActuator.validate(context);
-    vmActuator.execute(context);
+    try {
+      vmActuator.validate(context);
+      vmActuator.execute(context);
+    } finally {
+      // Match Wallet's constant-call lifecycle, including validation/execution failures.
+      VMConfig.clearLocalSnapshot();
+    }
 
     ProgramResult result = context.getProgramResult();
 
     Assert.assertNull(result.getRuntimeError());
+
+    // Later tests on this worker must observe global updates, not this call's snapshot.
+    boolean londonEnabled = VMConfig.allowTvmLondon();
+    try {
+      VMConfig.initAllowTvmLondon(londonEnabled ? 0 : 1);
+      Assert.assertEquals(!londonEnabled, VMConfig.allowTvmLondon());
+    } finally {
+      VMConfig.initAllowTvmLondon(londonEnabled ? 1 : 0);
+    }
 
   }
 

@@ -64,13 +64,9 @@ public class RuntimeImplTest extends BaseTest {
     repository.commit();
   }
 
-  /**
-   * These tests execute transactions in static mode, which installs a thread-local
-   * VMConfig snapshot. Clear it so later tests in the same worker JVM do not read a
-   * stale snapshot.
-   */
   @After
-  public void clearVmThreadLocal() {
+  public void clearConstantCallConfig() {
+    // Keep the snapshot for this test's energy assertions, then release it for the next test.
     VMConfig.clearLocalSnapshot();
   }
 

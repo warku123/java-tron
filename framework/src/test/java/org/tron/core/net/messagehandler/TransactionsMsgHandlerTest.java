@@ -5,26 +5,26 @@ import com.google.protobuf.ByteString;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
-import org.joda.time.DateTime;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.runtime.TvmTestUtils;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.ReflectUtils;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.P2pException;
@@ -47,145 +47,137 @@ public class TransactionsMsgHandlerTest extends BaseTest {
   }
 
   @Test
-  public void testProcessMessage() {
-    TransactionsMsgHandler transactionsMsgHandler = new TransactionsMsgHandler();
-    ExecutorService originalPool = null;
+  public void testProcessMessage() throws Exception {
+    TransactionsMsgHandler handler = new TransactionsMsgHandler();
     try {
-      transactionsMsgHandler.init();
+      ExecutorService pool = installMockPool(handler);
+      TronNetDelegate delegate = Mockito.mock(TronNetDelegate.class);
+      AdvService advService = Mockito.mock(AdvService.class);
+      ChainBaseManager chainManager = Mockito.mock(ChainBaseManager.class);
+      ReflectUtils.setFieldValue(handler, "tronNetDelegate", delegate);
+      ReflectUtils.setFieldValue(handler, "advService", advService);
+      ReflectUtils.setFieldValue(handler, "chainBaseManager", chainManager);
+      Assert.assertFalse(handler.isBusy());
 
       PeerConnection peer = Mockito.mock(PeerConnection.class);
-      TronNetDelegate tronNetDelegate = Mockito.mock(TronNetDelegate.class);
-      AdvService advService = Mockito.mock(AdvService.class);
+      Protocol.Transaction trx = buildTransferMessage(1).getTransactions().getTransactions(0);
+      trx = trx.toBuilder().setRawData(trx.getRawData().toBuilder()
+          .setExpiration(1_700_000_060_000L)).build();
+      TransactionsMessage msg = new TransactionsMessage(Collections.singletonList(trx));
+      stubAdvInvRequest(peer, msg);
+      handler.processMessage(peer, msg);
 
-      Field field = TransactionsMsgHandler.class.getDeclaredField("tronNetDelegate");
-      field.setAccessible(true);
-      field.set(transactionsMsgHandler, tronNetDelegate);
-
-      Assert.assertFalse(transactionsMsgHandler.isBusy());
-
-      BalanceContract.TransferContract transferContract = BalanceContract.TransferContract
-          .newBuilder()
-          .setAmount(10)
-          .setOwnerAddress(ByteString.copyFrom(ByteArray.fromHexString("121212a9cf")))
-          .setToAddress(ByteString.copyFrom(ByteArray.fromHexString("232323a9cf"))).build();
-
-      long transactionTimestamp = DateTime.now().minusDays(4).getMillis();
-      Protocol.Transaction trx = Protocol.Transaction.newBuilder().setRawData(
-          Protocol.Transaction.raw.newBuilder().setTimestamp(transactionTimestamp)
-          .setRefBlockNum(1)
-          .addContract(
-              Protocol.Transaction.Contract.newBuilder()
-                  .setType(Protocol.Transaction.Contract.ContractType.TransferContract)
-                  .setParameter(Any.pack(transferContract)).build()).build())
-          .build();
-      Map<Item, Long> advInvRequest = new ConcurrentHashMap<>();
-      Item item = new Item(new TransactionMessage(trx).getMessageId(),
-          Protocol.Inventory.InventoryType.TRX);
-      advInvRequest.put(item, 0L);
-      Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest);
-
-      List<Protocol.Transaction> transactionList = new ArrayList<>();
-      transactionList.add(trx);
-      transactionsMsgHandler.processMessage(peer, new TransactionsMessage(transactionList));
-      Assert.assertNull(advInvRequest.get(item));
-
-      CountDownLatch smartContractSubmitted = new CountDownLatch(1);
-      ExecutorService mockPool = Mockito.mock(ExecutorService.class);
-      Future<?> submittedTask = Mockito.mock(Future.class);
-      Mockito.when(mockPool.submit(Mockito.any(Runnable.class))).thenAnswer(invocation -> {
-        smartContractSubmitted.countDown();
-        return submittedTask;
-      });
-      originalPool = replaceTrxHandlePool(transactionsMsgHandler, mockPool);
-      BlockingQueue<?> smartContractQueue = new LinkedBlockingQueue<>(1);
-      Field field1 = TransactionsMsgHandler.class.getDeclaredField("smartContractQueue");
-      field1.setAccessible(true);
-      field1.set(transactionsMsgHandler, smartContractQueue);
-      Protocol.Transaction trx1 = TvmTestUtils.generateTriggerSmartContractAndGetTransaction(
-          ByteArray.fromHexString("121212a9cf"),
-          ByteArray.fromHexString("121212a9cf"),
-          ByteArray.fromHexString("123456"),
-          100, 100000000, 0, 0);
-      Protocol.Transaction trx3 = TvmTestUtils.generateTriggerSmartContractAndGetTransaction(
-          ByteArray.fromHexString("121212a9cf"),
-          ByteArray.fromHexString("121212a9cf"),
-          ByteArray.fromHexString("123457"),
-          100, 100000000, 0, 0);
-      Map<Item, Long> advInvRequest1 = new ConcurrentHashMap<>();
-      Item item1 = new Item(new TransactionMessage(trx1).getMessageId(),
-          Protocol.Inventory.InventoryType.TRX);
-      advInvRequest1.put(item1, 0L);
-      Item item3 = new Item(new TransactionMessage(trx3).getMessageId(),
-          Protocol.Inventory.InventoryType.TRX);
-      advInvRequest1.put(item3, 0L);
-      Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest1);
-      List<Protocol.Transaction> transactionList1 = new ArrayList<>();
-      transactionList1.add(trx1);
-      transactionList1.add(trx3);
-      transactionsMsgHandler.processMessage(peer, new TransactionsMessage(transactionList1));
-      Assert.assertNull(advInvRequest1.get(item1));
-      Assert.assertNull(advInvRequest1.get(item3));
-      Assert.assertTrue("smart-contract scheduler did not submit work",
-          smartContractSubmitted.await(3, TimeUnit.SECONDS));
-
-      // test 0 contract
-      Protocol.Transaction trx2 = Protocol.Transaction.newBuilder().setRawData(
-          Protocol.Transaction.raw.newBuilder().setTimestamp(transactionTimestamp)
-              .setRefBlockNum(1).build())
-          .build();
-      List<Protocol.Transaction> transactionList2 = new ArrayList<>();
-      transactionList2.add(trx2);
-      try {
-        transactionsMsgHandler.processMessage(peer, new TransactionsMessage(transactionList2));
-      } catch (Exception ep) {
-        Assert.assertTrue(true);
-      }
-      Map<Item, Long> advInvRequest2 = new ConcurrentHashMap<>();
-      Item item2 = new Item(new TransactionMessage(trx2).getMessageId(),
-          Protocol.Inventory.InventoryType.TRX);
-      advInvRequest2.put(item2, 0L);
-      Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest2);
-      try {
-        transactionsMsgHandler.processMessage(peer, new TransactionsMessage(transactionList2));
-      } catch (Exception ep) {
-        Assert.assertTrue(true);
-      }
-    } catch (Exception e) {
-      Assert.fail(e.getMessage());
+      Assert.assertTrue(peer.getAdvInvRequest().isEmpty());
+      ArgumentCaptor<Runnable> submitted = ArgumentCaptor.forClass(Runnable.class);
+      Mockito.verify(pool).submit(submitted.capture());
+      Mockito.verify(delegate).getCachedTransactionSize();
+      Mockito.verifyNoMoreInteractions(delegate);
+      Mockito.verifyNoInteractions(advService, chainManager);
+      Mockito.when(chainManager.getNextBlockSlotTime()).thenReturn(1_700_000_000_000L);
+      submitted.getValue().run();
+      Mockito.verify(delegate).pushTransaction(Mockito.any());
+      Mockito.verify(advService).broadcast(Mockito.any(TransactionMessage.class));
     } finally {
-      closeHandlerAndOriginalPool(transactionsMsgHandler, originalPool);
+      handler.close();
     }
+  }
+
+  @Test
+  public void testSmartContractQueueFull() throws Exception {
+    TransactionsMsgHandler handler = new TransactionsMsgHandler();
+    try {
+      ExecutorService pool = installMockPool(handler);
+      // Leave the scheduler stopped so queue capacity does not depend on thread timing.
+      BlockingQueue<TransactionsMsgHandler.TrxEvent> smartQueue = new LinkedBlockingQueue<>(1);
+      ReflectUtils.setFieldValue(handler, "smartContractQueue", smartQueue);
+      PeerConnection peer = Mockito.mock(PeerConnection.class);
+      Protocol.Transaction trx = TvmTestUtils.generateTriggerSmartContractAndGetTransaction(
+          ByteArray.fromHexString("121212a9cf"), ByteArray.fromHexString("121212a9cf"),
+          ByteArray.fromHexString("123456"), 100, 100000000, 0, 0);
+      TransactionsMessage msg = new TransactionsMessage(Collections.singletonList(trx));
+      stubAdvInvRequest(peer, msg);
+      handler.processMessage(peer, msg);
+      Assert.assertTrue(peer.getAdvInvRequest().isEmpty());
+      Assert.assertEquals(1, smartQueue.size());
+      TransactionsMsgHandler.TrxEvent queued = smartQueue.peek();
+      Assert.assertSame(peer, queued.getPeer());
+      Assert.assertEquals(new TransactionMessage(trx).getMessageId(),
+          queued.getMsg().getMessageId());
+
+      // A second requested transaction is dropped when the queue is already full.
+      Protocol.Transaction second = trx.toBuilder().setRawData(trx.getRawData().toBuilder()
+          .setTimestamp(1)).build();
+      TransactionsMessage secondMsg = new TransactionsMessage(
+          Collections.singletonList(second));
+      stubAdvInvRequest(peer, secondMsg);
+      handler.processMessage(peer, secondMsg);
+      Assert.assertTrue(peer.getAdvInvRequest().isEmpty());
+      Assert.assertEquals(1, smartQueue.size());
+      Assert.assertSame(queued, smartQueue.peek());
+      Mockito.verify(pool, Mockito.never()).submit(Mockito.any(Runnable.class));
+    } finally {
+      handler.close();
+    }
+  }
+
+  @Test
+  public void testTransactionWithoutContract() throws Exception {
+    TransactionsMsgHandler handler = new TransactionsMsgHandler();
+    try {
+      ExecutorService pool = installMockPool(handler);
+      PeerConnection peer = Mockito.mock(PeerConnection.class);
+      Protocol.Transaction trx = Protocol.Transaction.newBuilder().setRawData(
+          Protocol.Transaction.raw.newBuilder().setTimestamp(1).setRefBlockNum(1)).build();
+      TransactionsMessage msg = new TransactionsMessage(Collections.singletonList(trx));
+      Mockito.when(peer.getAdvInvRequest()).thenReturn(new ConcurrentHashMap<>());
+      P2pException missingRequest = Assert.assertThrows(P2pException.class,
+          () -> handler.processMessage(peer, msg));
+      Assert.assertEquals(TypeEnum.BAD_MESSAGE, missingRequest.getType());
+
+      stubAdvInvRequest(peer, msg);
+      P2pException missingContract = Assert.assertThrows(P2pException.class,
+          () -> handler.processMessage(peer, msg));
+      Assert.assertEquals(TypeEnum.BAD_TRX, missingContract.getType());
+      Assert.assertEquals(1, peer.getAdvInvRequest().size());
+      Mockito.verify(pool, Mockito.never()).submit(Mockito.any(Runnable.class));
+    } finally {
+      handler.close();
+    }
+  }
+
+  private ExecutorService installMockPool(TransactionsMsgHandler handler) throws Exception {
+    ExecutorService original = (ExecutorService) ReflectUtils.getFieldObject(handler,
+        "trxHandlePool");
+    original.shutdown();
+    Assert.assertTrue(original.awaitTermination(5, TimeUnit.SECONDS));
+    ExecutorService pool = Mockito.mock(ExecutorService.class);
+    Mockito.when(pool.awaitTermination(Mockito.anyLong(), Mockito.any())).thenReturn(true);
+    ReflectUtils.setFieldValue(handler, "trxHandlePool", pool);
+    return pool;
   }
 
   @Test
   public void testProcessMessageAfterClose() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
-    try {
-      handler.init();
-      handler.close();
+    handler.init();
+    handler.close();
 
-      PeerConnection peer = Mockito.mock(PeerConnection.class);
-      TransactionsMessage msg = Mockito.mock(TransactionsMessage.class);
+    PeerConnection peer = Mockito.mock(PeerConnection.class);
+    TransactionsMessage msg = Mockito.mock(TransactionsMessage.class);
 
-      handler.processMessage(peer, msg);
+    handler.processMessage(peer, msg);
 
-      Mockito.verify(msg, Mockito.never()).getTransactions();
-      Mockito.verifyNoInteractions(peer);
-    } finally {
-      handler.close();
-    }
+    Mockito.verify(msg, Mockito.never()).getTransactions();
+    Mockito.verifyNoInteractions(peer);
   }
 
   @Test
   public void testRejectedExecution() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
-    ExecutorService originalPool = null;
     try {
-      ExecutorService mockPool = Mockito.mock(ExecutorService.class);
+      ExecutorService mockPool = installMockPool(handler);
       Mockito.when(mockPool.submit(Mockito.any(Runnable.class)))
           .thenThrow(new RejectedExecutionException("pool closed"));
-      originalPool = replaceTrxHandlePool(handler, mockPool);
-
       PeerConnection peer = Mockito.mock(PeerConnection.class);
       TransactionsMessage msg = buildTransferMessage(2);
       stubAdvInvRequest(peer, msg);
@@ -194,27 +186,23 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       Mockito.verify(mockPool, Mockito.times(1)).submit(Mockito.any(Runnable.class));
     } finally {
-      closeHandlerAndOriginalPool(handler, originalPool);
+      handler.close();
     }
   }
 
   @Test
   public void testCloseDuringProcessing() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
-    ExecutorService originalPool = null;
     try {
       Field closedField = TransactionsMsgHandler.class.getDeclaredField("isClosed");
       closedField.setAccessible(true);
 
-      ExecutorService mockPool = Mockito.mock(ExecutorService.class);
-      Future<?> submittedTask = Mockito.mock(Future.class);
+      ExecutorService mockPool = installMockPool(handler);
       // on the first submit, flip isClosed to true so the second iteration breaks
       Mockito.when(mockPool.submit(Mockito.any(Runnable.class))).thenAnswer(inv -> {
         closedField.set(handler, true);
-        return submittedTask;
+        return null;
       });
-      originalPool = replaceTrxHandlePool(handler, mockPool);
-
       PeerConnection peer = Mockito.mock(PeerConnection.class);
       TransactionsMessage msg = buildTransferMessage(2);
       stubAdvInvRequest(peer, msg);
@@ -222,7 +210,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       Mockito.verify(mockPool, Mockito.times(1)).submit(Mockito.any(Runnable.class));
     } finally {
-      closeHandlerAndOriginalPool(handler, originalPool);
+      handler.close();
     }
   }
 
@@ -254,34 +242,6 @@ public class TransactionsMsgHandlerTest extends BaseTest {
       advInvRequest.put(item, 0L);
     }
     Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest);
-  }
-
-  private ExecutorService replaceTrxHandlePool(TransactionsMsgHandler handler, ExecutorService pool)
-      throws Exception {
-    Field poolField = TransactionsMsgHandler.class.getDeclaredField("trxHandlePool");
-    poolField.setAccessible(true);
-    ExecutorService originalPool = (ExecutorService) poolField.get(handler);
-    poolField.set(handler, pool);
-    return originalPool;
-  }
-
-  private void closeHandlerAndOriginalPool(TransactionsMsgHandler handler,
-      ExecutorService originalPool) {
-    try {
-      handler.close();
-    } finally {
-      if (originalPool != null) {
-        originalPool.shutdown();
-        try {
-          if (!originalPool.awaitTermination(5, TimeUnit.SECONDS)) {
-            originalPool.shutdownNow();
-          }
-        } catch (InterruptedException e) {
-          originalPool.shutdownNow();
-          Thread.currentThread().interrupt();
-        }
-      }
-    }
   }
 
   @Test
@@ -390,8 +350,8 @@ public class TransactionsMsgHandlerTest extends BaseTest {
   @Test
   public void testInvalidSigLength() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
-    handler.init();
     try {
+      ExecutorService pool = installMockPool(handler);
       PeerConnection peer = Mockito.mock(PeerConnection.class);
 
       BalanceContract.TransferContract transferContract = BalanceContract.TransferContract
@@ -467,6 +427,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
       paddedList.add(paddedSigTrx);
       stubAdvInvRequest(peer, new TransactionsMessage(paddedList));
       handler.processMessage(peer, new TransactionsMessage(paddedList));
+      Mockito.verify(pool, Mockito.times(2)).submit(Mockito.any(Runnable.class));
     } finally {
       handler.close();
     }
@@ -475,6 +436,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
   @Test
   public void testIsBusyWithCachedTransactions() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
+
     try {
       int threshold = Args.getInstance().getMaxTrxCacheSize();
       TronNetDelegate tronNetDelegateMock = Mockito.mock(TronNetDelegate.class);
@@ -496,4 +458,5 @@ public class TransactionsMsgHandlerTest extends BaseTest {
       handler.close();
     }
   }
+
 }

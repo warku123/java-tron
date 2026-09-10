@@ -144,7 +144,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage3 = new HelloMessage(builder.build().toByteArray());
       Assert.assertFalse(helloMessage3.valid());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
   }
 
@@ -204,7 +204,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage = new HelloMessage(builder.build().toByteArray());
       method.invoke(p2pEventHandler, peer, helloMessage.getSendBytes());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
     Args.getInstance().fastForward = false;
   }
@@ -233,7 +233,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage = new HelloMessage(builder.build().toByteArray());
       method.invoke(p2pEventHandler, peer, helloMessage.getSendBytes());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
 
     //genesisBlock is not equal => INCOMPATIBLE_CHAIN
@@ -249,7 +249,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage = new HelloMessage(builder.build().toByteArray());
       method.invoke(p2pEventHandler, peer, helloMessage.getSendBytes());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
 
     // peer's solidityBlock <= my solidityBlock, but not contained
@@ -272,7 +272,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage = new HelloMessage(builder.build().toByteArray());
       method.invoke(p2pEventHandler, peer, helloMessage.getSendBytes());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
 
     // peer's solidityBlock <= my solidityBlock, but not contained
@@ -282,7 +282,7 @@ public class HandShakeServiceTest {
       HelloMessage helloMessage = new HelloMessage(builder.build().toByteArray());
       method.invoke(p2pEventHandler, peer, helloMessage.getSendBytes());
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
   }
 
@@ -312,7 +312,7 @@ public class HandShakeServiceTest {
       HandshakeService handshakeService = new HandshakeService();
       handshakeService.processHelloMessage(p, helloMessage);
     } catch (Exception e) {
-      Assert.fail();
+      throw new AssertionError("Unexpected exception", e);
     }
   }
 

@@ -5,7 +5,6 @@ import static org.tron.common.utils.ByteUtil.longTo32Bytes;
 import java.util.Collections;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 import org.tron.common.runtime.TVMTestResult;
@@ -106,14 +105,5 @@ public class AllowTvmLondonTest extends VMTestBase {
         null);
     runtime = TvmTestUtils.processTransactionAndReturnRuntime(trx, rootRepository, null);
     Assert.assertNotNull(runtime.getRuntimeError());
-  }
-
-  /**
-   * These tests set ConfigLoader.disable = true. Restore it so later tests in the
-   * same worker JVM still reload VMConfig from the dynamic properties store.
-   */
-  @After
-  public void restoreConfigLoader() {
-    ConfigLoader.disable = false;
   }
 }

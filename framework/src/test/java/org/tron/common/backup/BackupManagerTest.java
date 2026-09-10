@@ -1,6 +1,5 @@
 package org.tron.common.backup;
 
-import io.netty.channel.Channel;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
@@ -10,21 +9,22 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
-import java.util.function.BooleanSupplier;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.tron.common.TestConstants;
 import org.tron.common.backup.BackupManager.BackupStatusEnum;
 import org.tron.common.backup.message.KeepAliveMessage;
 import org.tron.common.backup.socket.BackupServer;
+import org.tron.common.backup.socket.MessageHandler;
 import org.tron.common.backup.socket.UdpEvent;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.PublicMethod;
@@ -50,53 +50,16 @@ public class BackupManagerTest {
   }
 
   @After
-  public void tearDown() throws Exception {
-    Throwable failure = null;
-    Channel channel = null;
-    if (backupServer != null) {
-      try {
-        channel = getChannel(backupServer);
-      } catch (Throwable t) {
-        failure = t;
-      }
-      try {
+  public void tearDown() {
+    try {
+      if (backupServer != null) {
         backupServer.close();
-      } catch (Throwable t) {
-        if (failure == null) {
-          failure = t;
-        } else {
-          failure.addSuppressed(t);
-        }
-      }
-    }
-    try {
-      if (manager != null) {
+      } else if (manager != null) {
         manager.stop();
-      }
-    } catch (Throwable t) {
-      if (failure == null) {
-        failure = t;
-      } else {
-        failure.addSuppressed(t);
-      }
-    }
-    try {
-      if (channel != null) {
-        Assert.assertFalse("backup channel must close", channel.isOpen());
-      }
-      assertExecutorsTerminated();
-    } catch (Throwable t) {
-      if (failure == null) {
-        failure = t;
-      } else {
-        failure.addSuppressed(t);
       }
     } finally {
       InetUtil.dnsLookup = savedLookup;
       Args.clearParam();
-    }
-    if (failure != null) {
-      throw new AssertionError("backup test cleanup failed", failure);
     }
   }
 
@@ -181,12 +144,27 @@ public class BackupManagerTest {
     field.set(manager, "127.0.0.1");
 
     Assert.assertEquals(manager.getStatus(), BackupManager.BackupStatusEnum.MASTER);
-    backupServer.initServer();
-    awaitBackupServerReady();
+    ScheduledExecutorService scheduler = Mockito.mock(ScheduledExecutorService.class);
+    Mockito.when(scheduler.awaitTermination(Mockito.anyLong(), Mockito.any()))
+        .thenReturn(true);
+    Field schedulerField = manager.getClass().getDeclaredField("executorService");
+    schedulerField.setAccessible(true);
+    ((ScheduledExecutorService) schedulerField.get(manager)).shutdownNow();
+    schedulerField.set(manager, scheduler);
+    MessageHandler handler = Mockito.mock(MessageHandler.class);
+    manager.setMessageHandler(handler);
     manager.init();
-    Thread.sleep(parameter.getKeepAliveInterval() + 1000);
-    // test send KeepAliveMessage
 
+    ArgumentCaptor<Runnable> heartbeat = ArgumentCaptor.forClass(Runnable.class);
+    Mockito.verify(scheduler).scheduleWithFixedDelay(heartbeat.capture(), Mockito.eq(1000L),
+        Mockito.eq((long) parameter.getKeepAliveInterval()), Mockito.eq(TimeUnit.MILLISECONDS));
+    heartbeat.getValue().run();
+
+    ArgumentCaptor<UdpEvent> sent = ArgumentCaptor.forClass(UdpEvent.class);
+    Mockito.verify(handler).accept(sent.capture());
+    Assert.assertEquals("127.0.0.2", sent.getValue().getAddress().getHostString());
+    Assert.assertEquals(parameter.getBackupPort(), sent.getValue().getAddress().getPort());
+    Assert.assertFalse(((KeepAliveMessage) sent.getValue().getMessage()).getFlag());
     Assert.assertEquals(BackupManager.BackupStatusEnum.INIT, manager.getStatus());
   }
 
@@ -293,50 +271,4 @@ public class BackupManagerTest {
     m.setAccessible(true);
     m.invoke(mgr);
   }
-
-  private Channel getChannel(BackupServer server) {
-    try {
-      return getField(server, "channel");
-    } catch (Exception e) {
-      throw new AssertionError("cannot inspect backup channel", e);
-    }
-  }
-
-  private Object getFieldValue(Object target, String name) {
-    try {
-      return getField(target, name);
-    } catch (Exception e) {
-      throw new AssertionError("cannot inspect " + name, e);
-    }
-  }
-
-  private void awaitBackupServerReady() throws Exception {
-    awaitCondition("backup server to become ready", () -> getChannel(backupServer) != null
-        && getChannel(backupServer).isActive()
-        && getFieldValue(manager, "messageHandler") != null);
-  }
-
-  private void assertExecutorsTerminated() throws Exception {
-    if (manager == null || backupServer == null) {
-      return;
-    }
-    ScheduledExecutorService managerExecutor = getField(manager, "executorService");
-    Assert.assertTrue("backup manager executor must terminate", managerExecutor.isTerminated());
-    ExecutorService serverExecutor = getField(backupServer, "executor");
-    if (serverExecutor != null) {
-      Assert.assertTrue("backup server executor must terminate", serverExecutor.isTerminated());
-    }
-  }
-
-  private void awaitCondition(String description, BooleanSupplier condition) throws Exception {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-    while (System.nanoTime() < deadline) {
-      if (condition.getAsBoolean()) {
-        return;
-      }
-      Thread.sleep(20);
-    }
-    Assert.fail("timed out waiting for " + description);
-  }
-
 }

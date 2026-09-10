@@ -41,6 +41,9 @@ import org.tron.core.db.Manager;
 public abstract class BaseMethodTest {
 
   @Rule
+  public final VMConfigRule vmConfigRule = new VMConfigRule();
+
+  @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   protected TronApplicationContext context;
@@ -79,11 +82,17 @@ public abstract class BaseMethodTest {
 
   @After
   public final void destroyContext() {
-    beforeDestroy();
-    if (context != null) {
-      context.close(); // triggers appT.shutdown() via TronApplicationContext
+    try {
+      beforeDestroy();
+    } finally {
+      try {
+        if (context != null) {
+          context.close(); // triggers appT.shutdown() via TronApplicationContext
+        }
+      } finally {
+        Args.clearParam();
+      }
     }
-    Args.clearParam();
   }
 
   protected void beforeDestroy() {
