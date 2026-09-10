@@ -7,6 +7,7 @@ import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -38,6 +39,8 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
   private static final String OWNER_ACCOUNT_INVALID;
   private static final long initBalance = 10_000_000_000L;
   private static final long frozenBalance = 1_000_000_000L;
+  private long previousAllowTvmConstantinople;
+  private long previousAllowTvmSolidity059;
 
   static {
     Args.setParam(new String[]{"--output-directory", dbPath()}, TestConstants.TEST_CONF);
@@ -52,6 +55,10 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
    */
   @Before
   public void createAccountCapsule() {
+    previousAllowTvmConstantinople =
+        dbManager.getDynamicPropertiesStore().getAllowTvmConstantinople();
+    previousAllowTvmSolidity059 =
+        dbManager.getDynamicPropertiesStore().getAllowTvmSolidity059();
     AccountCapsule ownerCapsule = new AccountCapsule(ByteString.copyFromUtf8("owner"),
         ByteString.copyFrom(ByteArray.fromHexString(OWNER_ADDRESS)), AccountType.Normal,
         initBalance);
@@ -61,6 +68,14 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
         ByteString.copyFrom(ByteArray.fromHexString(RECEIVER_ADDRESS)), AccountType.Normal,
         initBalance);
     dbManager.getAccountStore().put(receiverCapsule.getAddress().toByteArray(), receiverCapsule);
+  }
+
+  @After
+  public void restoreForkFlags() {
+    // Prevent fork-flag changes from polluting later tests in the same JVM.
+    dbManager.getDynamicPropertiesStore()
+        .saveAllowTvmConstantinople(previousAllowTvmConstantinople);
+    dbManager.getDynamicPropertiesStore().saveAllowTvmSolidity059(previousAllowTvmSolidity059);
   }
 
   private Any getContractForBandwidth(String ownerAddress) {
@@ -1172,4 +1187,3 @@ public class UnfreezeBalanceActuatorTest extends BaseTest {
   }
 
 }
-
