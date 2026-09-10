@@ -6,9 +6,7 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.ToString;
 import org.bouncycastle.util.encoders.Hex;
-import org.junit.After;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Test;
 import org.tron.common.runtime.ProgramResult;
 import org.tron.common.runtime.TVMTestResult;
@@ -25,9 +23,6 @@ import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Result.contractResult;
 
 public class TransferFailedEnergyTest extends VMTestBase {
-  private long previousAllowTvmTransferTrc10;
-  private long previousAllowTvmConstantinople;
-  private long previousAllowTvmSolidity059;
   /*
   pragma solidity ^0.5.4;
   contract EnergyOfTransferFailedTest {
@@ -227,25 +222,6 @@ public class TransferFailedEnergyTest extends VMTestBase {
       new TestCase("testTransferTokenInsufficientBalance(trcToken)",
           Collections.singletonList(1000001), false, contractResult.REVERT),
   };
-
-  @Before
-  public void snapshotForkFlags() {
-    previousAllowTvmTransferTrc10 =
-        manager.getDynamicPropertiesStore().getAllowTvmTransferTrc10();
-    previousAllowTvmConstantinople =
-        manager.getDynamicPropertiesStore().getAllowTvmConstantinople();
-    previousAllowTvmSolidity059 = manager.getDynamicPropertiesStore().getAllowTvmSolidity059();
-  }
-
-  @After
-  public void restoreForkFlags() {
-    // Prevent fork-flag changes from polluting later tests in the same JVM.
-    manager.getDynamicPropertiesStore()
-        .saveAllowTvmTransferTrc10(previousAllowTvmTransferTrc10);
-    manager.getDynamicPropertiesStore()
-        .saveAllowTvmConstantinople(previousAllowTvmConstantinople);
-    manager.getDynamicPropertiesStore().saveAllowTvmSolidity059(previousAllowTvmSolidity059);
-  }
 
   @Test
   public void testTransferFailedAfterAllowTvmConstantinopl()
