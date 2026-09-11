@@ -26,8 +26,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.Constant;
-import org.tron.core.services.filter.BufferedResponseWrapper;
-import org.tron.core.services.filter.CachedBodyRequestWrapper;
 import org.tron.core.services.http.RateLimiterServlet;
 
 @Component
@@ -144,18 +142,15 @@ public class JsonRpcServlet extends RateLimiterServlet {
     if (isBatch) {
       handleBatch(resp, rootNode, maxResponseSize);
     } else {
-      handleSingle(req, resp, rootNode, body, maxResponseSize);
+      handleSingle(resp, rootNode, maxResponseSize);
     }
   }
 
-  private void handleSingle(HttpServletRequest req, HttpServletResponse resp,
-      JsonNode rootNode, byte[] body, int maxResponseSize) throws IOException {
-    CachedBodyRequestWrapper cachedReq = new CachedBodyRequestWrapper(req, body);
-    BufferedResponseWrapper bufferedResp = new BufferedResponseWrapper(
-        resp, maxResponseSize);
-
+  private void handleSingle(HttpServletResponse resp, JsonNode rootNode, int maxResponseSize)
+      throws IOException {
+    byte[] responseBytes;
     try {
-      rpcServer.handle(cachedReq, bufferedResp);
+      responseBytes = executeOne(rootNode);
     } catch (RuntimeException e) {
       logger.error("RPC execution failed", e);
       writeJsonRpcError(resp, JsonRpcError.INTERNAL_ERROR, "Internal error",
@@ -163,17 +158,22 @@ public class JsonRpcServlet extends RateLimiterServlet {
       return;
     }
 
-    bufferedResp.commitToResponse();
-    if (bufferedResp.isOverflow()) {
+    if (maxResponseSize > 0 && responseBytes.length > maxResponseSize) {
       writeJsonRpcError(resp, JsonRpcError.RESPONSE_TOO_LARGE,
           "Response exceeds the limit of " + maxResponseSize + " bytes",
           rootNode.get("id"), false);
+      return;
     }
+
+    resp.setContentType("application/json-rpc");
+    resp.setStatus(HttpServletResponse.SC_OK);
+    resp.setContentLength(responseBytes.length);
+    resp.getOutputStream().write(responseBytes);
+    resp.getOutputStream().flush();
   }
 
   private void handleBatch(HttpServletResponse resp, JsonNode rootNode, int maxResponseSize)
       throws IOException {
-
     ArrayNode batchResult = MAPPER.createArrayNode();
     int accumulatedSize = 2; // "[]"
     boolean overflow = false;
@@ -185,7 +185,6 @@ public class JsonRpcServlet extends RateLimiterServlet {
         if (!subRequest.isObject()) {
           batchResult.add(buildErrorNode(JsonRpcError.INVALID_REQUEST, "Invalid Request", null));
         } else if (subRequest.has("id")) {
-          // Notifications (no "id") do not get a response even on overflow.
           batchResult.add(buildErrorNode(JsonRpcError.RESPONSE_TOO_LARGE,
               "Response exceeds the limit of " + maxResponseSize + " bytes",
               subRequest.get("id")));
@@ -206,29 +205,19 @@ public class JsonRpcServlet extends RateLimiterServlet {
         continue;
       }
 
-      byte[] subBody;
+      byte[] responseBytes;
       try {
-        subBody = MAPPER.writeValueAsBytes(subRequest);
-      } catch (JsonProcessingException e) {
-        writeJsonRpcError(resp, JsonRpcError.INTERNAL_ERROR, "Internal error", null, true);
-        return;
-      }
-
-      ByteArrayOutputStream subOutput = new ByteArrayOutputStream();
-      try {
-        rpcServer.handleRequest(new ByteArrayInputStream(subBody), subOutput);
+        responseBytes = executeOne(subRequest);
       } catch (RuntimeException e) {
         logger.error("RPC execution failed for batch sub-request {}", i, e);
         writeJsonRpcError(resp, JsonRpcError.INTERNAL_ERROR, "Internal error", null, true);
         return;
       }
 
-      byte[] responseBytes = subOutput.toByteArray();
       if (responseBytes.length == 0) {
         continue; // notification — no response
       }
 
-      // comma(,) separator between array elements
       int addition = responseBytes.length + (!batchResult.isEmpty() ? 1 : 0);
       if (maxResponseSize > 0 && accumulatedSize + addition > maxResponseSize) {
         overflow = true;
@@ -249,7 +238,6 @@ public class JsonRpcServlet extends RateLimiterServlet {
       batchResult.add(responseNode);
     }
 
-    // JSON-RPC 2.0 §6: MUST NOT return an empty Array when there are no response objects.
     if (batchResult.isEmpty()) {
       resp.setContentType("application/json-rpc");
       resp.setStatus(HttpServletResponse.SC_OK);
@@ -263,6 +251,17 @@ public class JsonRpcServlet extends RateLimiterServlet {
     resp.setContentLength(finalBytes.length);
     resp.getOutputStream().write(finalBytes);
     resp.getOutputStream().flush();
+  }
+
+  /**
+   * Execute a single JSON-RPC request and return the raw response bytes.
+   * Uses jsonrpc4j handleRequest stream API for uniform single/batch handling.
+   */
+  private byte[] executeOne(JsonNode request) throws IOException {
+    byte[] requestBody = MAPPER.writeValueAsBytes(request);
+    ByteArrayOutputStream responseOutput = new ByteArrayOutputStream();
+    rpcServer.handleRequest(new ByteArrayInputStream(requestBody), responseOutput);
+    return responseOutput.toByteArray();
   }
 
   private byte[] readBody(InputStream in) throws IOException {

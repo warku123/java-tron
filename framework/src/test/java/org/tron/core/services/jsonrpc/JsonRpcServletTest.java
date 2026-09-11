@@ -142,12 +142,12 @@ public class JsonRpcServletTest {
     assertEquals("", resp.getContentAsString());
   }
 
-  // --- rpcServer.handle exceptions ---
+  // --- rpcServer.handleRequest exceptions ---
 
   @Test
   public void rpcServerThrowsRuntimeException_returnsInternalError() throws Exception {
     doThrow(new RuntimeException("server exploded")).when(mockRpcServer)
-        .handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+        .handleRequest(any(InputStream.class), any(OutputStream.class));
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\",\"id\":42}");
     assertEquals(200, resp.getStatus());
     JsonNode body = MAPPER.readTree(resp.getContentAsString());
@@ -173,10 +173,10 @@ public class JsonRpcServletTest {
     int limit = 50;
     CommonParameter.getInstance().jsonRpcMaxResponseSize = limit;
     doAnswer(inv -> {
-      HttpServletResponse r = inv.getArgument(1);
-      r.getOutputStream().write(new byte[limit + 1]);
-      return null;
-    }).when(mockRpcServer).handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+      OutputStream out = inv.getArgument(1);
+      out.write(new byte[limit + 1]);
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
 
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_getLogs\",\"id\":1}");
     assertEquals(200, resp.getStatus());
@@ -239,10 +239,10 @@ public class JsonRpcServletTest {
   public void normalRequest_commitsRpcServerResponse() throws Exception {
     byte[] rpcResp = "{\"result\":\"0x1\"}".getBytes(StandardCharsets.UTF_8);
     doAnswer(inv -> {
-      HttpServletResponse r = inv.getArgument(1);
-      r.getOutputStream().write(rpcResp);
-      return null;
-    }).when(mockRpcServer).handle(any(HttpServletRequest.class), any(HttpServletResponse.class));
+      OutputStream out = inv.getArgument(1);
+      out.write(rpcResp);
+      return 0;
+    }).when(mockRpcServer).handleRequest(any(InputStream.class), any(OutputStream.class));
 
     MockHttpServletResponse resp = doPost("{\"method\":\"eth_blockNumber\",\"id\":1}");
     assertEquals(200, resp.getStatus());
