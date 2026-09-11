@@ -7,7 +7,9 @@ import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.ClassRule;
+import org.junit.Rule;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.springframework.test.annotation.DirtiesContext;
@@ -17,6 +19,7 @@ import org.tron.common.application.Application;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Commons;
+import org.tron.common.utils.PeerManagerStateResetter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.consensus.base.Param;
 import org.tron.core.ChainBaseManager;
@@ -61,6 +64,9 @@ import org.tron.protos.Protocol;
 @DirtiesContext
 public abstract class BaseTest {
 
+  @Rule
+  public final VMConfigRule vmConfigRule = new VMConfigRule();
+
   @ClassRule
   public static final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
@@ -75,6 +81,11 @@ public abstract class BaseTest {
   private static Application appT1;
 
 
+  @Before
+  public void resetPeerManagerState() {
+    PeerManagerStateResetter.reset();
+  }
+
   @PostConstruct
   private void prepare() {
     appT1 = appT;
@@ -84,15 +95,20 @@ public abstract class BaseTest {
     try {
       return temporaryFolder.newFolder().toString();
     } catch (IOException e) {
-      Assert.fail("create temp folder failed");
+      throw new AssertionError("create temp folder failed", e);
     }
-    return null;
   }
 
   @AfterClass
   public static void destroy() {
-    appT1.shutdown();
-    Args.clearParam();
+    try {
+      if (appT1 != null) {
+        appT1.shutdown();
+      }
+    } finally {
+      appT1 = null;
+      Args.clearParam();
+    }
   }
 
   public void closePeer() {

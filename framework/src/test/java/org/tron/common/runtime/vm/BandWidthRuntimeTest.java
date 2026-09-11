@@ -85,7 +85,6 @@ public class BandWidthRuntimeTest extends BaseTest {
     //init energy
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(1526547838000L);
     dbManager.getDynamicPropertiesStore().saveTotalEnergyWeight(10_000_000L);
-
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(0);
 
     AccountCapsule accountCapsule = new AccountCapsule(ByteString.copyFrom("owner".getBytes()),
