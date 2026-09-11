@@ -78,4 +78,15 @@ public class MetricLabels {
 
   }
 
+  // Info
+  public static class Info {
+    public static final String VERSION = "version";
+    public static final String CHAIN_ID = "chain_id";
+
+    private Info() {
+      throw new IllegalStateException("Info");
+    }
+
+  }
+
 }

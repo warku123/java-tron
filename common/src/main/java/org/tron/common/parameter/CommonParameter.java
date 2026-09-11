@@ -499,9 +499,6 @@ public class CommonParameter {
   public int maxTrxCacheSize;
   @Getter
   @Setter
-  public boolean nodeMetricsEnable = false;
-  @Getter
-  @Setter
   public boolean metricsPrometheusEnable = false;
   @Getter
   @Setter

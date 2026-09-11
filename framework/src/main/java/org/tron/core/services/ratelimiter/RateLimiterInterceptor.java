@@ -18,8 +18,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.parameter.RateLimiterInitialization.RpcRateLimiterItem;
 import org.tron.core.config.args.Args;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.services.ratelimiter.adapter.DefaultBaseQqsAdapter;
 import org.tron.core.services.ratelimiter.adapter.IPreemptibleRateLimiter;
 import org.tron.core.services.ratelimiter.adapter.IRateLimiter;
@@ -96,11 +94,6 @@ public class RateLimiterInterceptor implements ServerInterceptor {
   public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call, Metadata headers,
       ServerCallHandler<ReqT, RespT> next) {
 
-    String methodMeterName = MetricsKey.NET_API_DETAIL_QPS
-        + call.getMethodDescriptor().getFullMethodName();
-    MetricsUtil.meterMark(MetricsKey.NET_API_QPS);
-    MetricsUtil.meterMark(methodMeterName);
-
     IRateLimiter rateLimiter = container
         .get(KEY_PREFIX_RPC, call.getMethodDescriptor().getFullMethodName());
 
@@ -148,10 +141,6 @@ public class RateLimiterInterceptor implements ServerInterceptor {
       if (rateLimiter instanceof IPreemptibleRateLimiter) {
         ((IPreemptibleRateLimiter) rateLimiter).release();
       }
-      String grpcFailMeterName = MetricsKey.NET_API_DETAIL_FAIL_QPS
-          + call.getMethodDescriptor().getFullMethodName();
-      MetricsUtil.meterMark(MetricsKey.NET_API_FAIL_QPS);
-      MetricsUtil.meterMark(grpcFailMeterName);
       logger.error("Rpc Api Error: {}", e.getMessage());
       // Close the call so the client gets an immediate INTERNAL status instead of
       // hanging until the transport-level deadline fires.

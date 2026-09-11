@@ -432,7 +432,6 @@ public class Args extends CommonParameter {
 
   /**
    * Bridge MetricsConfig bean values to CommonParameter fields.
-   * Note: node.metricsEnable is handled in applyNodeConfig (it's a node-level field).
    */
   private static void applyMetricsConfig(MetricsConfig mc) {
     PARAMETER.metricsPrometheusEnable = mc.getPrometheus().isEnable();
@@ -615,7 +614,6 @@ public class Args extends CommonParameter {
     PARAMETER.agreeNodeCount = nc.getAgreeNodeCount();
 
     PARAMETER.openHistoryQueryWhenLiteFN = nc.isOpenHistoryQueryWhenLiteFN();
-    PARAMETER.nodeMetricsEnable = nc.isMetricsEnable();
     PARAMETER.openPrintLog = nc.isOpenPrintLog();
     PARAMETER.openTransactionSort = nc.isOpenTransactionSort();
     PARAMETER.blockCacheTimeout = nc.getBlockCacheTimeout();
@@ -1315,4 +1313,3 @@ public class Args extends CommonParameter {
     return optionGroupMap;
   }
 }
-

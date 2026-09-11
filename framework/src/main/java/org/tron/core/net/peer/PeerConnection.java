@@ -24,7 +24,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.overlay.message.Message;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.Pair;
@@ -34,8 +36,6 @@ import org.tron.core.Constant;
 import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.config.Parameter.NetConstants;
 import org.tron.core.config.args.Args;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.P2pRateLimiter;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.message.adv.InventoryMessage;
@@ -91,6 +91,11 @@ public class PeerConnection {
   @Setter
   @Getter
   private volatile long blockRcvTime;
+
+  @Getter
+  private volatile long fetchLatency;
+
+  private volatile boolean fetchLatencySeeded;
 
   @Getter
   @Setter
@@ -182,6 +187,26 @@ public class PeerConnection {
         Args.getInstance().getRateLimiterFetchInvData());
     p2pRateLimiter.register(P2P_DISCONNECT.asByte(),
         Args.getInstance().getRateLimiterDisconnect());
+  }
+
+  /**
+   * Updates the bounded fetch latency estimator with channel-latency initialization/fallback.
+   * The first measured fetch latency is intentionally blended with the channel estimate because
+   * the first fetch is often the slowest and the RTT prior is more robust against outliers.
+   * A single fetch worker reads this value while the channel event loop writes it; volatile is
+   * sufficient for this benign race and no lock should be added.
+   *
+   * @param latencyMillis measured fetch latency in milliseconds
+   */
+  public void updateFetchLatency(long latencyMillis) {
+    if (!fetchLatencySeeded) {
+      fetchLatency = channel.getAvgLatency();
+      fetchLatencySeeded = true;
+    }
+    fetchLatency = (fetchLatency * 9 + latencyMillis) / 10;
+    // Saturation intentionally makes the >= timeout gate in FetchBlockService trigger.
+    fetchLatency = StrictMathWrapper.max(0,
+        StrictMathWrapper.min(CommonParameter.getInstance().fetchBlockTimeout, fetchLatency));
   }
 
   public void setBlockBothHave(BlockId blockId) {
@@ -304,8 +329,6 @@ public class PeerConnection {
         channel.close();
         break;
     }
-    MetricsUtil.counterInc(MetricsKey.NET_DISCONNECTION_COUNT);
-    MetricsUtil.counterInc(MetricsKey.NET_DISCONNECTION_DETAIL + reason);
     Metrics.counterInc(MetricKeys.Counter.P2P_DISCONNECT, 1,
             reason.name().toLowerCase(Locale.ROOT));
   }

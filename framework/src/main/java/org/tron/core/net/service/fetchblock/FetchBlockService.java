@@ -16,8 +16,6 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
-import org.tron.core.metrics.MetricsKey;
-import org.tron.core.metrics.MetricsUtil;
 import org.tron.core.net.TronNetDelegate;
 import org.tron.core.net.message.adv.FetchInvDataMessage;
 import org.tron.core.net.peer.Item;
@@ -97,9 +95,8 @@ public class FetchBlockService {
         .filter(PeerConnection::isIdle)
         .filter(filterPeer -> !filterPeer.equals(fetchBlock.getPeer()))
         .filter(filterPeer -> filterPeer.getAdvInvReceive().getIfPresent(item) != null)
-        .filter(filterPeer -> getPeerTop75(filterPeer)
-            <= CommonParameter.getInstance().fetchBlockTimeout)
-        .min(Comparator.comparingDouble(this::getPeerTop75));
+        // Clamping bounds latency by timeout; min() ordering handles candidate selection.
+        .min(Comparator.comparingDouble(this::getPeerLatency));
 
     if (optionalPeerConnection.isPresent()) {
       optionalPeerConnection.ifPresent(firstPeer -> {
@@ -120,21 +117,27 @@ public class FetchBlockService {
   }
 
   private boolean shouldFetchBlock(PeerConnection newPeer, FetchBlockInfo fetchBlock) {
-    double newPeerTop75 = getPeerTop75(newPeer);
-    double oldPeerTop75 = getPeerTop75(fetchBlock.getPeer());
+    double newPeerLatency = getPeerLatency(newPeer);
+    double oldPeerLatency = getPeerLatency(fetchBlock.getPeer());
     long oldPeerSpendTime = System.currentTimeMillis() - fetchBlock.getTime();
-    if (oldPeerTop75 > fetchTimeOut || oldPeerSpendTime >= fetchTimeOut) {
+    // Switch unconditionally on a hard timeout: an unseeded or saturated old peer must not
+    // permanently wedge fetchBlockInfo.
+    if (oldPeerSpendTime >= fetchTimeOut) {
       return true;
     }
 
-    double oldPeerLeftTime = oldPeerTop75 - oldPeerSpendTime;
-    return newPeerTop75 < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
-        && oldPeerSpendTime + newPeerTop75 < fetchTimeOut;
+    // Require a strictly better peer for the latency saturation gate to prevent 500v500 flapping.
+    if (oldPeerLatency >= fetchTimeOut && newPeerLatency < oldPeerLatency) {
+      return true;
+    }
+
+    double oldPeerLeftTime = oldPeerLatency - oldPeerSpendTime;
+    return newPeerLatency < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
+        && oldPeerSpendTime + newPeerLatency < fetchTimeOut;
   }
 
-  private double getPeerTop75(PeerConnection peerConnection) {
-    return MetricsUtil.getHistogram(MetricsKey.NET_LATENCY_FETCH_BLOCK
-        + peerConnection.getInetAddress()).getSnapshot().get75thPercentile();
+  private double getPeerLatency(PeerConnection peerConnection) {
+    return peerConnection.getFetchLatency();
   }
 
   private static class FetchBlockInfo {

@@ -10,6 +10,7 @@ import org.tron.common.arch.Arch;
 import org.tron.common.exit.ExitManager;
 import org.tron.common.log.LogService;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.Metrics;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
@@ -60,6 +61,9 @@ public class FullNode {
     Application appT = ApplicationFactory.create(context);
     context.registerShutdownHook();
     appT.startup();
+    // chainId is only available after the context refresh (Manager.initGenesis)
+    Metrics.info(MetricKeys.Info.NODE_INFO, Version.getVersion(),
+        Args.getInstance().getChainId());
     if (parameter.isSolidityNode()) {
       SolidityNode node = context.getBean(SolidityNode.class);
       node.run();
