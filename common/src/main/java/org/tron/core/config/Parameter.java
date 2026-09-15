@@ -34,6 +34,8 @@ public class Parameter {
     VERSION_4_8_2_2(37, 1596780000000L, 70),
     VERSION_CLOSE_EXCHANGE(38, 0L, 100);
     // if add a version, modify BLOCK_VERSION simultaneously
+    // NOTE: VERSION_CLOSE_EXCHANGE intentionally stays above BLOCK_VERSION(37) here;
+    // it is provably inert on this branch until the activation release bumps BLOCK_VERSION.
 
     @Getter
     private int value;
