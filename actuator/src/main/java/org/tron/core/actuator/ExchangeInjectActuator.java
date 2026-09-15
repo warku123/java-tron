@@ -115,6 +115,11 @@ public class ExchangeInjectActuator extends AbstractExchangeActuator {
 
   @Override
   public boolean validate() throws ContractValidateException {
+    int closeLevel = chainBaseManager.getDynamicPropertiesStore().getCloseExchange();
+    if (closeLevel >= 1) {
+      throw new ContractValidateException(
+          "ExchangeInjectContract is rejected by exchange close level " + closeLevel);
+    }
     try {
       return doValidate();
     } catch (ArithmeticException e) {

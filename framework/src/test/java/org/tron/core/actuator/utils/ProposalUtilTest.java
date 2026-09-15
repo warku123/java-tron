@@ -759,9 +759,12 @@ public class ProposalUtilTest extends BaseTest {
     long exchangeCreateFeeCode = ProposalType.EXCHANGE_CREATE_FEE.getCode();
     long hardenExchangeCode = ProposalType.ALLOW_HARDEN_EXCHANGE_CALCULATION.getCode();
 
-    Assert.assertTrue("BLOCK_VERSION must be ready for VERSION_CLOSE_EXCHANGE",
+    // This branch intentionally ships VERSION_CLOSE_EXCHANGE above BLOCK_VERSION (see the
+    // NOTE in Parameter.java): the fork is inert until the activation release bumps
+    // BLOCK_VERSION. assert the inertness invariant instead of readiness.
+    Assert.assertTrue("VERSION_CLOSE_EXCHANGE must stay above BLOCK_VERSION (inert)",
         Parameter.ChainConstant.BLOCK_VERSION
-            >= ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue());
+            < ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue());
 
     // 1) fork VERSION_CLOSE_EXCHANGE not passed yet -> rejected, even though 4.8.2 passed
     ContractValidateException thrown = assertThrows(ContractValidateException.class,
@@ -899,6 +902,13 @@ public class ProposalUtilTest extends BaseTest {
   @Test
   public void blockVersionCheck() {
     for (ForkBlockVersionEnum forkVersion : ForkBlockVersionEnum.values()) {
+      // VERSION_CLOSE_EXCHANGE is intentionally above BLOCK_VERSION on this branch (inert
+      // until the activation release); every other fork must be within BLOCK_VERSION.
+      if (forkVersion == ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE) {
+        Assert.assertTrue("VERSION_CLOSE_EXCHANGE must stay above BLOCK_VERSION (inert)",
+            forkVersion.getValue() > Parameter.ChainConstant.BLOCK_VERSION);
+        continue;
+      }
       if (forkVersion.getValue() > Parameter.ChainConstant.BLOCK_VERSION) {
         Assert.fail("ForkBlockVersion must be less than BLOCK_VERSION");
       }

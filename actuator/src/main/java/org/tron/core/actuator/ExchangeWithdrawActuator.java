@@ -122,6 +122,11 @@ public class ExchangeWithdrawActuator extends AbstractExchangeActuator {
 
   @Override
   public boolean validate() throws ContractValidateException {
+    int closeLevel = chainBaseManager.getDynamicPropertiesStore().getCloseExchange();
+    if (closeLevel == 2) {
+      throw new ContractValidateException(
+          "ExchangeWithdrawContract is rejected by exchange close level " + closeLevel);
+    }
     try {
       return doValidate();
     } catch (ArithmeticException e) {

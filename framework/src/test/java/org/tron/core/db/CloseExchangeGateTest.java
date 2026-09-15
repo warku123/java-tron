@@ -7,12 +7,15 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
 import java.util.Arrays;
 import java.util.Collections;
 import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Before;
+import org.junit.FixMethodOrder;
 import org.junit.Test;
+import org.junit.runners.MethodSorters;
 import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
@@ -30,7 +33,6 @@ import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ConsensusService;
 import org.tron.core.exception.ContractValidateException;
-import org.tron.core.exception.ValidateSignatureException;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
@@ -42,20 +44,25 @@ import org.tron.protos.contract.ExchangeContract.ExchangeTransactionContract;
 import org.tron.protos.contract.ExchangeContract.ExchangeWithdrawContract;
 
 /**
- * Regression tests for the CLOSE_EXCHANGE entrance gate in {@link Manager}.
+ * Regression tests for the CLOSE_EXCHANGE actuator-level gate.
  *
  * Covers:
  *  - DynamicPropertiesStore CLOSE_EXCHANGE default (missing key -> 0) and round trip.
- *  - pushTransaction truth table: level 0/1/2 x {Create, Inject, Transaction, Withdraw}
- *    plus a non-exchange contract.
- *  - The legacy 4.8.0.1 ExchangeTransaction predicate is untouched (level 0 + harden 0 still
- *    rejects with the legacy message) and allowHardenExchangeCalculation cannot bypass the
- *    new gate.
- *  - generateBlock skips closed exchange contracts but keeps packing unrelated transactions.
- *  - The block validation path (processBlock -> rejectExchangeTransaction) rejects blocks
- *    containing closed exchange contracts.
+ *  - Build phase (Wallet.createTransactionCapsule pre-validate): level 1 rejects
+ *    Create/Inject/Transaction and lets Withdraw through the gate; level 2 rejects all
+ *    four; level 0 adds no new rejection.
+ *  - Broadcast path (pushTransaction -> processTransaction -> actuator.validate()):
+ *    signed transactions are rejected with
+ *    "&lt;ContractType&gt; is rejected by exchange close level &lt;level&gt;".
+ *  - The legacy 4.8.0.1 ExchangeTransaction predicate is untouched (level 0 + harden 0
+ *    still rejects with the legacy message) and allowHardenExchangeCalculation cannot
+ *    bypass the actuator gate.
+ *  - generateBlock skips closed exchange contracts but keeps packing unrelated ones;
+ *    level 0 keeps ExchangeCreate packable.
+ *  - The block validation path rejects blocks containing closed exchange contracts.
  */
 @Slf4j
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 public class CloseExchangeGateTest extends BaseTest {
 
   private static final String ACCOUNT_NAME_FIRST = "ownerF";
@@ -68,10 +75,10 @@ public class CloseExchangeGateTest extends BaseTest {
    * from it yields null (NPE in packedTrx/buildLocalWitnessBlock). Mirrors the established
    * fixture pattern in ManagerTest.afterInit.
    *
-   * <p>The key doubles as the owner key of OWNER_ADDRESS_SECOND: the packing
-   * (generateBlock) and block-apply paths run the full processTransaction pipeline,
-   * which validates transaction signatures, so executable transactions must be signed by
-   * the owner key itself.
+   * <p>The key doubles as the owner key of OWNER_ADDRESS_SECOND: the broadcast
+   * (pushTransaction), packing (generateBlock) and block-apply paths run the full
+   * processTransaction pipeline, which validates transaction signatures, so executable
+   * transactions must be signed by the owner key itself.
    */
   private static final String OWNER_PRIVATE_KEY = PublicMethod.getRandomPrivateKey();
   private static boolean consensusStarted = false;
@@ -86,6 +93,9 @@ public class CloseExchangeGateTest extends BaseTest {
 
   @Resource
   private ConsensusService consensusService;
+
+  @Resource
+  private Wallet wallet;
 
   static {
     Args.setParam(new String[]{"--output-directory", dbPath()}, TestConstants.TEST_CONF);
@@ -143,14 +153,77 @@ public class CloseExchangeGateTest extends BaseTest {
   }
 
   // --------------------------------------------------------------------------------------------
-  // pushTransaction truth table
+  // Build phase: Wallet.createTransactionCapsule pre-validates via actuator.validate()
+  // --------------------------------------------------------------------------------------------
+
+  @Test
+  public void buildPhaseLevel0AddsNoNewRejection() throws Exception {
+    dbManager.getDynamicPropertiesStore().saveCloseExchange(0);
+    prepareExchangeFixture();
+
+    // ExchangeCreate validates fully at level 0 (funded fixture).
+    TransactionCapsule trx = wallet.createTransactionCapsule(
+        buildContractMessage(ContractType.ExchangeCreateContract),
+        ContractType.ExchangeCreateContract);
+    assertNotNull(trx);
+
+    // The remaining three need an on-chain exchange in their doValidate, which this
+    // fixture does not create; the gate assertion is that no close-level message fires.
+    for (ContractType type : exchangeTypes()) {
+      assertFalse("level 0 must not fire the close gate for " + type,
+          buildPhaseRejectionContainsCloseLevel(type, 0));
+    }
+  }
+
+  @Test
+  public void buildPhaseLevel1RejectsCreateInjectTransactionButNotWithdraw() {
+    dbManager.getDynamicPropertiesStore().saveCloseExchange(1);
+
+    assertBuildPhaseGateRejects(ContractType.ExchangeCreateContract, 1);
+    assertBuildPhaseGateRejects(ContractType.ExchangeInjectContract, 1);
+    assertBuildPhaseGateRejects(ContractType.ExchangeTransactionContract, 1);
+
+    // Withdraw requires level 2, so it passes the gate at level 1 (its remaining
+    // doValidate checks are out of scope here).
+    assertFalse("Withdraw must pass the actuator gate at level 1",
+        buildPhaseRejectionContainsCloseLevel(ContractType.ExchangeWithdrawContract, 1));
+  }
+
+  @Test
+  public void buildPhaseLevel2RejectsAllExchangeContracts() {
+    dbManager.getDynamicPropertiesStore().saveCloseExchange(2);
+
+    assertBuildPhaseGateRejects(ContractType.ExchangeCreateContract, 2);
+    assertBuildPhaseGateRejects(ContractType.ExchangeInjectContract, 2);
+    assertBuildPhaseGateRejects(ContractType.ExchangeTransactionContract, 2);
+    assertBuildPhaseGateRejects(ContractType.ExchangeWithdrawContract, 2);
+  }
+
+  private void assertBuildPhaseGateRejects(ContractType type, int level) {
+    ContractValidateException e = assertThrows(ContractValidateException.class,
+        () -> wallet.createTransactionCapsule(buildContractMessage(type), type));
+    assertEquals(type + " is rejected by exchange close level " + level, e.getMessage());
+  }
+
+  private boolean buildPhaseRejectionContainsCloseLevel(ContractType type, int level) {
+    try {
+      wallet.createTransactionCapsule(buildContractMessage(type), type);
+      return false;
+    } catch (ContractValidateException e) {
+      return e.getMessage().contains("is rejected by exchange close level " + level);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------
+  // Broadcast path: pushTransaction -> processTransaction -> actuator.validate()
   // --------------------------------------------------------------------------------------------
 
   @Test
   public void pushTransactionLevel0RejectsNothingNewAndKeepsLegacyBehavior() {
     dbManager.getDynamicPropertiesStore().saveCloseExchange(0);
 
-    // Level 0: the new gate never fires; every exchange contract passes the gate stage.
+    // Level 0: the actuator gate never fires; unsigned transactions pass the gate stage
+    // and fail at signature validation instead.
     assertPushPassesGate(buildTrx(ContractType.ExchangeCreateContract));
     assertPushPassesGate(buildTrx(ContractType.ExchangeInjectContract));
     assertPushPassesGate(buildTrx(ContractType.ExchangeWithdrawContract));
@@ -165,41 +238,44 @@ public class CloseExchangeGateTest extends BaseTest {
   }
 
   @Test
-  public void pushTransactionLevel1RejectsCreateInjectTransactionButNotWithdraw() {
+  public void pushTransactionLevel1RejectsCreateInjectTransactionButNotWithdraw() throws Exception {
     dbManager.getDynamicPropertiesStore().saveCloseExchange(1);
+    ensureHeadAdvanced();
 
     assertGateRejects(ContractType.ExchangeCreateContract, 1);
     assertGateRejects(ContractType.ExchangeInjectContract, 1);
-    // with harden=0 the untouched legacy 4.8.0.1 predicate fires before the new gate and
-    // rejects with its own message; the new gate message for this type is asserted in
+    // with harden=0 the untouched legacy 4.8.0.1 predicate fires before the actuator gate
+    // and rejects with its own message; the gate message for this type is asserted in
     // hardenModeCannotBypassCloseGate.
     assertGateRejects(ContractType.ExchangeTransactionContract, 1);
 
-    // Withdraw requires level 2, so it passes the gate at level 1.
-    assertPushPassesGate(buildTrx(ContractType.ExchangeWithdrawContract));
-
-    // Non-exchange contract: unaffected.
-    assertPushPassesGate(buildTransferTrx());
+    // Withdraw requires level 2, so it passes the gate at level 1 and fails later in its
+    // own doValidate (this fixture has no on-chain exchange).
+    assertFalse("Withdraw must pass the actuator gate at level 1",
+        broadcastRejectionContainsCloseLevel(ContractType.ExchangeWithdrawContract));
   }
 
   @Test
-  public void pushTransactionLevel2RejectsAllExchangeContracts() {
+  public void pushTransactionLevel2RejectsAllExchangeContracts() throws Exception {
     dbManager.getDynamicPropertiesStore().saveCloseExchange(2);
+    ensureHeadAdvanced();
 
     assertGateRejects(ContractType.ExchangeCreateContract, 2);
     assertGateRejects(ContractType.ExchangeInjectContract, 2);
     assertGateRejects(ContractType.ExchangeTransactionContract, 2);
     assertGateRejects(ContractType.ExchangeWithdrawContract, 2);
 
-    // Non-exchange contract: unaffected even at the highest level.
-    assertPushPassesGate(buildTransferTrx());
+    // Non-exchange contract: unaffected even at the highest level - the transfer is
+    // validated and executed end to end.
+    assertTrue(dbManager.pushTransaction(packedTrx(buildTransferTrx())));
   }
 
   @Test
-  public void hardenModeCannotBypassCloseGate() {
+  public void hardenModeCannotBypassCloseGate() throws Exception {
     // allowHardenExchangeCalculation=1 disables the legacy ExchangeTransaction predicate
-    // (isExchangeTransaction returns false), but the new gate must still fire.
+    // (isExchangeTransaction returns false), but the actuator gate must still fire.
     dbManager.getDynamicPropertiesStore().saveAllowHardenExchangeCalculation(1);
+    ensureHeadAdvanced();
 
     dbManager.getDynamicPropertiesStore().saveCloseExchange(1);
     assertGateRejects(ContractType.ExchangeTransactionContract, 1);
@@ -207,67 +283,92 @@ public class CloseExchangeGateTest extends BaseTest {
     dbManager.getDynamicPropertiesStore().saveCloseExchange(2);
     assertGateRejects(ContractType.ExchangeWithdrawContract, 2);
 
-    // Level 0 + harden 1: neither legacy predicate nor new gate applies.
+    // Level 0 + harden 1: neither legacy predicate nor actuator gate applies. The
+    // transaction is unsigned, so it passes the gate and fails at signature validation -
+    // full execution would need an on-chain exchange fixture.
     dbManager.getDynamicPropertiesStore().saveCloseExchange(0);
     assertPushPassesGate(buildTrx(ContractType.ExchangeTransactionContract));
   }
 
   private void assertGateRejects(ContractType type, int level) {
     ContractValidateException e = assertThrows(ContractValidateException.class,
-        () -> dbManager.pushTransaction(buildTrx(type)));
+        () -> dbManager.pushTransaction(packedTrx(buildTrx(type))));
     if (type == ContractType.ExchangeTransactionContract
         && !dbManager.getDynamicPropertiesStore().allowHardenExchangeCalculation()) {
-      // legacy 4.8.0.1 predicate runs before the new gate and rejects with its own message
+      // legacy 4.8.0.1 predicate runs before the actuator gate and rejects with its own
+      // message
       assertEquals("ExchangeTransactionContract is rejected", e.getMessage());
     } else {
       assertEquals(type + " is rejected by exchange close level " + level, e.getMessage());
     }
   }
 
+  private boolean broadcastRejectionContainsCloseLevel(ContractType type) {
+    try {
+      dbManager.pushTransaction(packedTrx(buildTrx(type)));
+      return false;
+    } catch (Exception e) {
+      return String.valueOf(e.getMessage()).contains("is rejected by exchange close level");
+    }
+  }
+
   private void assertPushPassesGate(TransactionCapsule trx) {
-    // The gate sits before signature validation, so an unsigned transaction that passes
-    // the gate reaches the signature stage and fails there - not with a gate message.
+    // The actuator gate sits behind signature validation, so an unsigned transaction that
+    // passes the gate reaches the signature stage and fails there - not with a gate
+    // message.
     Exception e = assertThrows(Exception.class, () -> dbManager.pushTransaction(trx));
     assertFalse("transaction must pass the close-exchange gate, but got: " + e.getMessage(),
         String.valueOf(e.getMessage()).contains("is rejected by exchange close level"));
   }
 
-  private TransactionCapsule buildTrx(ContractType exchangeType) {
+  private Message buildContractMessage(ContractType exchangeType) {
     ByteString owner = ByteString.copyFrom(ByteArray.fromHexString(OWNER_ADDRESS_SECOND));
     switch (exchangeType) {
       case ExchangeCreateContract:
-        return new TransactionCapsule(ExchangeCreateContract.newBuilder()
+        return ExchangeCreateContract.newBuilder()
             .setOwnerAddress(owner)
             .setFirstTokenId(ByteString.copyFrom("_".getBytes()))
             .setFirstTokenBalance(100_000_000L + TRX_NONCE.incrementAndGet())
             .setSecondTokenId(ByteString.copyFrom("1".getBytes()))
             .setSecondTokenBalance(100_000_000L)
-            .build(), ContractType.ExchangeCreateContract);
+            .build();
       case ExchangeInjectContract:
-        return new TransactionCapsule(ExchangeInjectContract.newBuilder()
+        return ExchangeInjectContract.newBuilder()
             .setOwnerAddress(owner)
             .setExchangeId(1)
             .setTokenId(ByteString.copyFrom("_".getBytes()))
             .setQuant(1)
-            .build(), ContractType.ExchangeInjectContract);
+            .build();
       case ExchangeTransactionContract:
-        return new TransactionCapsule(ExchangeTransactionContract.newBuilder()
+        return ExchangeTransactionContract.newBuilder()
             .setOwnerAddress(owner)
             .setExchangeId(1)
             .setTokenId(ByteString.copyFrom("_".getBytes()))
             .setQuant(1)
             .setExpected(1)
-            .build(), ContractType.ExchangeTransactionContract);
+            .build();
       case ExchangeWithdrawContract:
-        return new TransactionCapsule(ExchangeWithdrawContract.newBuilder()
+        return ExchangeWithdrawContract.newBuilder()
             .setOwnerAddress(owner)
             .setExchangeId(1)
             .setTokenId(ByteString.copyFrom("_".getBytes()))
             .setQuant(1)
-            .build(), ContractType.ExchangeWithdrawContract);
+            .build();
       default:
         throw new IllegalArgumentException("unsupported type " + exchangeType);
     }
+  }
+
+  private java.util.List<ContractType> exchangeTypes() {
+    return java.util.Arrays.asList(
+        ContractType.ExchangeCreateContract,
+        ContractType.ExchangeInjectContract,
+        ContractType.ExchangeTransactionContract,
+        ContractType.ExchangeWithdrawContract);
+  }
+
+  private TransactionCapsule buildTrx(ContractType exchangeType) {
+    return new TransactionCapsule(buildContractMessage(exchangeType), exchangeType);
   }
 
   private TransactionCapsule buildTransferTrx() {
@@ -287,6 +388,14 @@ public class CloseExchangeGateTest extends BaseTest {
     prepareExchangeFixture();
     ensureHeadAdvanced();
     dbManager.getDynamicPropertiesStore().saveCloseExchange(1);
+    // Broadcast tests upstream may have left signed transactions in the shared pending
+    // queue; flush it so packing observes exactly the transactions of this test.
+    dbManager.getPendingTransactions().clear();
+    assertEquals(1, dbManager.getDynamicPropertiesStore().getCloseExchange());
+    // Manager keeps a long-lived pushTransaction session; a successful push flushes it so
+    // the gate-level write becomes visible to the packing path (generateBlock).
+    dbManager.pushTransaction(packedTrx(buildTransferTrx()));
+    dbManager.getPendingTransactions().clear();
 
     dbManager.getPendingTransactions()
         .add(packedTrx(buildTrx(ContractType.ExchangeCreateContract)));
@@ -306,6 +415,16 @@ public class CloseExchangeGateTest extends BaseTest {
     prepareExchangeFixture();
     ensureHeadAdvanced();
     dbManager.getDynamicPropertiesStore().saveCloseExchange(0);
+    // Broadcast tests upstream may have left signed transactions in the shared pending
+    // queue; flush it so packing observes exactly the transactions of this test.
+    dbManager.getPendingTransactions().clear();
+    // The Spring context (and its revoking-store snapshot stack) is shared with the
+    // other test classes; verify the level write actually stuck before packing.
+    assertEquals(0, dbManager.getDynamicPropertiesStore().getCloseExchange());
+    // Manager keeps a long-lived pushTransaction session; a successful push flushes it so
+    // the gate-level write becomes visible to the packing path (generateBlock).
+    dbManager.pushTransaction(packedTrx(buildTransferTrx()));
+    dbManager.getPendingTransactions().clear();
 
     dbManager.getPendingTransactions()
         .add(packedTrx(buildTrx(ContractType.ExchangeCreateContract)));
@@ -384,7 +503,7 @@ public class CloseExchangeGateTest extends BaseTest {
   }
 
   // --------------------------------------------------------------------------------------------
-  // Block validation path (processBlock -> rejectExchangeTransaction)
+  // Block validation path (pushBlock -> processTransaction -> actuator.validate())
   // --------------------------------------------------------------------------------------------
 
   @Test
@@ -461,8 +580,8 @@ public class CloseExchangeGateTest extends BaseTest {
     for (TransactionCapsule trx : trxs) {
       blockCapsule.addTransaction(trx);
     }
-    // generatedByMyself skips preValidateTransactionSign, so the gate under test is the
-    // first per-transaction check in the block validation path.
+    // generatedByMyself skips preValidateTransactionSign, so the actuator gate under test
+    // is the first per-transaction check in the block validation path.
     blockCapsule.generatedByMyself = true;
     blockCapsule.setMerkleRoot();
     blockCapsule.sign(privateKey);
