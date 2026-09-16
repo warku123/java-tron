@@ -43,6 +43,9 @@ public abstract class BaseMethodTest {
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
+  @Rule
+  public final VMConfigRule vmConfigRule = new VMConfigRule();
+
   protected TronApplicationContext context;
   protected Application appT;
   protected Manager dbManager;
