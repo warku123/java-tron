@@ -2,7 +2,7 @@ name: Retry Zero Unit Test Cleanup Verifier
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, release_v4.8.3]
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
