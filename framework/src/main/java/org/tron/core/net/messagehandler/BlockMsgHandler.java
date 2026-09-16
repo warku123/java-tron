@@ -5,6 +5,8 @@ import static org.tron.core.config.Parameter.ChainConstant.BLOCK_SIZE;
 
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.prometheus.MetricKeys;
@@ -32,6 +34,10 @@ import org.tron.protos.Protocol.Inventory.InventoryType;
 @Slf4j(topic = "net")
 @Component
 public class BlockMsgHandler implements TronMsgHandler {
+
+  private static final boolean TRACE = Boolean.getBoolean("fetch.trace");
+
+  private static final Logger traceLogger = LoggerFactory.getLogger("fetch-trace");
 
   @Autowired
   private RelayService relayService;
@@ -95,6 +101,15 @@ public class BlockMsgHandler implements TronMsgHandler {
                 + peer.getInetAddress(), now - time);
         Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_FETCH_LATENCY,
             (now - time) / Metrics.MILLISECONDS_PER_SECOND);
+        if (TRACE) {
+          traceLogger.info(
+              "write peer={} sampleMs={} count={} p75={}",
+              peer.getInetAddress(), now - time,
+              MetricsUtil.getHistogram(MetricsKey.NET_LATENCY_FETCH_BLOCK
+                  + peer.getInetAddress()).getCount(),
+              MetricsUtil.getHistogram(MetricsKey.NET_LATENCY_FETCH_BLOCK
+                  + peer.getInetAddress()).getSnapshot().get75thPercentile());
+        }
       }
       Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_RECEIVE_DELAY,
           (now - blockMessage.getBlockCapsule().getTimeStamp()) / Metrics.MILLISECONDS_PER_SECOND);

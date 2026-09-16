@@ -6,9 +6,12 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.es.ExecutorServiceManager;
@@ -38,9 +41,15 @@ public class FetchBlockService {
 
   private FetchBlockInfo fetchBlockInfo = null;
 
+  private String decisionBranch = "-";
+
   private final long fetchTimeOut = CommonParameter.getInstance().fetchBlockTimeout;
 
   private static final double BLOCK_FETCH_LEFT_TIME_PERCENT = 0.5;
+
+  private static final boolean TRACE = Boolean.getBoolean("fetch.trace");
+
+  private static final Logger traceLogger = LoggerFactory.getLogger("fetch-trace");
 
   private final String esName = "fetch-block";
 
@@ -106,12 +115,17 @@ public class FetchBlockService {
 
     if (optionalPeerConnection.isPresent()) {
       optionalPeerConnection.ifPresent(firstPeer -> {
-        if (shouldFetchBlock(firstPeer, fetchBlock)
-            && firstPeer.checkAndPutAdvInvRequest(item, System.currentTimeMillis())) {
+        boolean shouldFetch = shouldFetchBlock(firstPeer, fetchBlock);
+        boolean requestOk = shouldFetch
+            && firstPeer.checkAndPutAdvInvRequest(item, System.currentTimeMillis());
+        if (requestOk) {
           firstPeer.sendMessage(new FetchInvDataMessage(Collections.singletonList(item.getHash()),
               item.getType()));
           Metrics.counterInc(MetricKeys.Counter.BLOCK_FETCH_SECONDARY, 1);
           this.fetchBlockInfo = null;
+        }
+        if (TRACE) {
+          traceEval(fetchBlock, firstPeer, shouldFetch, requestOk);
         }
       });
     } else {
@@ -119,6 +133,9 @@ public class FetchBlockService {
         logger.info("Clear fetchBlockInfo due to fetch block {} timeout {}ms",
                 fetchBlock.getHash(), fetchTimeOut);
         this.fetchBlockInfo = null;
+      }
+      if (TRACE) {
+        traceEval(fetchBlock, null, false, false);
       }
     }
   }
@@ -128,12 +145,53 @@ public class FetchBlockService {
     double oldPeerTop75 = getPeerTop75(fetchBlock.getPeer());
     long oldPeerSpendTime = System.currentTimeMillis() - fetchBlock.getTime();
     if (oldPeerTop75 > fetchTimeOut || oldPeerSpendTime >= fetchTimeOut) {
+      decisionBranch = "hard-timeout";
       return true;
     }
 
     double oldPeerLeftTime = oldPeerTop75 - oldPeerSpendTime;
-    return newPeerTop75 < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
-        && oldPeerSpendTime + newPeerTop75 < fetchTimeOut;
+    boolean switchFaster = newPeerTop75 < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT;
+    boolean switchInTime = oldPeerSpendTime + newPeerTop75 < fetchTimeOut;
+    decisionBranch = switchFaster ? (switchInTime ? "comparison-pass" : "fast-switch-P75")
+        : "fail";
+    return switchFaster && switchInTime;
+  }
+
+  private void traceEval(FetchBlockInfo fetchBlock, PeerConnection target, boolean shouldFetch,
+      boolean requestOk) {
+    BlockCapsule.BlockId blockId = new BlockCapsule.BlockId(fetchBlock.getHash());
+    String block = blockId.getNum() + "@" + blockId.toString().substring(0, 8);
+    long spendMs = System.currentTimeMillis() - fetchBlock.getTime();
+    String oldPeer = String.valueOf(fetchBlock.getPeer().getInetAddress());
+    double oldP75 = getPeerTop75(fetchBlock.getPeer());
+    long oldN = getHistCount(fetchBlock.getPeer());
+    String candidates = tronNetDelegate.getActivePeer().stream()
+        .filter(PeerConnection::isIdle)
+        .filter(filterPeer -> !filterPeer.equals(fetchBlock.getPeer()))
+        .filter(filterPeer -> filterPeer.getAdvInvReceive().getIfPresent(
+            new Item(fetchBlock.getHash(), InventoryType.BLOCK)) != null)
+        .map(peer -> peer.getInetAddress() + ":p75=" + getPeerTop75(peer)
+            + ":n=" + getHistCount(peer))
+        .collect(Collectors.joining(","));
+    String branch;
+    String targetIp;
+    if (target == null) {
+      branch = spendMs >= fetchTimeOut ? "timeout-clear" : "no-candidate";
+      targetIp = "-";
+    } else {
+      branch = decisionBranch;
+      targetIp = String.valueOf(target.getInetAddress());
+    }
+    traceLogger.info(
+        "eval block={} oldPeer={} spendMs={} oldP75={} oldN={} candidates=[{}] "
+            + "branch={} target={} switch={} put={}",
+        block, oldPeer, spendMs, oldP75, oldN, candidates,
+        branch, targetIp, target == null ? "-" : shouldFetch, target == null ? "-" : requestOk);
+  }
+
+  private long getHistCount(PeerConnection peer) {
+    return MetricsUtil.getHistogram(
+        MetricsKey.NET_LATENCY_FETCH_BLOCK + peer.getInetAddress()).getCount();
   }
 
   private double getPeerTop75(PeerConnection peerConnection) {
