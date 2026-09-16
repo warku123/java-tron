@@ -9,6 +9,8 @@ import java.util.concurrent.TimeUnit;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.es.ExecutorServiceManager;
@@ -27,6 +29,14 @@ import org.tron.protos.Protocol.Inventory.InventoryType;
 @Slf4j(topic = "net")
 @Component
 public class FetchBlockService {
+
+  /**
+   * Throwaway decision-trace switch for the phase1 instrumentation branch. Enable with
+   * -Dfetch.trace=true; off by default so behavior and log volume are unchanged.
+   */
+  private static final boolean TRACE = Boolean.getBoolean("fetch.trace");
+
+  private static final Logger traceLogger = LoggerFactory.getLogger("fetch-trace");
 
   @Autowired
   private TronNetDelegate tronNetDelegate;
@@ -102,43 +112,81 @@ public class FetchBlockService {
         // fallback is not, but min() ordering and the saturation gate keep it safe.
         .min(Comparator.comparingDouble(this::getPeerLatency));
 
+    // Branch recorded by shouldFetchBlock via the out-param; boolean logic and the
+    // shouldFetchBlock-then-checkAndPutAdvInvRequest short-circuit are unchanged.
+    String decision;
+    PeerConnection target = null;
     if (optionalPeerConnection.isPresent()) {
-      optionalPeerConnection.ifPresent(firstPeer -> {
-        if (shouldFetchBlock(firstPeer, fetchBlock)
-            && firstPeer.checkAndPutAdvInvRequest(item, System.currentTimeMillis())) {
-          firstPeer.sendMessage(new FetchInvDataMessage(Collections.singletonList(item.getHash()),
-              item.getType()));
-          Metrics.counterInc(MetricKeys.Counter.BLOCK_FETCH_SECONDARY, 1);
-          this.fetchBlockInfo = null;
-        }
-      });
+      PeerConnection firstPeer = optionalPeerConnection.get();
+      String[] branch = new String[1];
+      if (shouldFetchBlock(firstPeer, fetchBlock, branch)
+          && firstPeer.checkAndPutAdvInvRequest(item, System.currentTimeMillis())) {
+        firstPeer.sendMessage(new FetchInvDataMessage(Collections.singletonList(item.getHash()),
+            item.getType()));
+        Metrics.counterInc(MetricKeys.Counter.BLOCK_FETCH_SECONDARY, 1);
+        this.fetchBlockInfo = null;
+        target = firstPeer;
+      }
+      decision = branch[0];
     } else {
       if (System.currentTimeMillis() - fetchBlock.getTime() >= fetchTimeOut) {
         logger.info("Clear fetchBlockInfo due to fetch block {} timeout {}ms",
                 fetchBlock.getHash(), fetchTimeOut);
         this.fetchBlockInfo = null;
+        decision = "timeout-clear";
+      } else {
+        decision = "no-candidate";
       }
+    }
+    if (TRACE) {
+      traceDecision(fetchBlock, optionalPeerConnection, decision, target);
     }
   }
 
-  private boolean shouldFetchBlock(PeerConnection newPeer, FetchBlockInfo fetchBlock) {
+  private boolean shouldFetchBlock(PeerConnection newPeer, FetchBlockInfo fetchBlock,
+      String[] branch) {
     double newPeerLatency = getPeerLatency(newPeer);
     double oldPeerLatency = getPeerLatency(fetchBlock.getPeer());
     long oldPeerSpendTime = System.currentTimeMillis() - fetchBlock.getTime();
     // Switch unconditionally on a hard timeout: an unseeded or saturated old peer must not
     // permanently wedge fetchBlockInfo.
     if (oldPeerSpendTime >= fetchTimeOut) {
+      branch[0] = "hard-timeout";
       return true;
     }
 
     // Require a strictly better peer for the latency saturation gate to prevent 500v500 flapping.
     if (oldPeerLatency >= fetchTimeOut && newPeerLatency < oldPeerLatency) {
+      branch[0] = "saturation-gate";
       return true;
     }
 
     double oldPeerLeftTime = oldPeerLatency - oldPeerSpendTime;
-    return newPeerLatency < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
-        && oldPeerSpendTime + newPeerLatency < fetchTimeOut;
+    branch[0] = newPeerLatency < oldPeerLeftTime * BLOCK_FETCH_LEFT_TIME_PERCENT
+        && oldPeerSpendTime + newPeerLatency < fetchTimeOut
+        ? "comparison-pass" : "comparison-fail";
+    return "comparison-pass".equals(branch[0]);
+  }
+
+  private void traceDecision(FetchBlockInfo fetchBlock, Optional<PeerConnection> candidate,
+      String decision, PeerConnection target) {
+    StringBuilder sb = new StringBuilder(224);
+    sb.append("decision=").append(decision)
+        .append(" hash=").append(fetchBlock.getHash().toString(), 0, 8)
+        .append(" oldPeer=").append(fetchBlock.getPeer().getInetAddress())
+        .append(" spendTimeMs=").append(System.currentTimeMillis() - fetchBlock.getTime())
+        .append(" oldEstimateMs=").append(getPeerLatency(fetchBlock.getPeer()));
+    if (candidate.isPresent()) {
+      sb.append(" candidate=").append(candidate.get().getInetAddress())
+          .append(" candidateEstimateMs=").append(getPeerLatency(candidate.get()));
+    } else {
+      sb.append(" candidate=-");
+    }
+    sb.append(" sent=").append(target != null);
+    if (target != null) {
+      sb.append(" target=").append(target.getInetAddress());
+    }
+    traceLogger.info(sb.toString());
   }
 
   private double getPeerLatency(PeerConnection peerConnection) {

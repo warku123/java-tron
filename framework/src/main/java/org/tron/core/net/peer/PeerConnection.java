@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
@@ -104,6 +106,14 @@ public class PeerConnection {
    * 140, 176, 208, 237, 263, 286, 307, 326, 343, 358 without ever hitting the clamp).
    */
   private static final int EWMA_DIVISOR = 10;
+
+  /**
+   * Throwaway decision-trace switch for the phase1 instrumentation branch. Enable with
+   * -Dfetch.trace=true; off by default so behavior and log volume are unchanged.
+   */
+  private static final boolean TRACE = Boolean.getBoolean("fetch.trace");
+
+  private static final Logger traceLogger = LoggerFactory.getLogger("fetch-trace");
 
   private volatile long fetchLatency;
 
@@ -217,12 +227,21 @@ public class PeerConnection {
    * @param latencyMillis measured fetch latency in milliseconds
    */
   public void updateFetchLatency(long latencyMillis) {
-    if (!fetchLatencySeeded) {
+    // Capture the pre-update state once for the trace line; the seeded/EWMA branch order
+    // and the clamped arithmetic are unchanged.
+    boolean firstSample = !fetchLatencySeeded;
+    long oldLatency = fetchLatency;
+    if (firstSample) {
       fetchLatency = clampFetchLatency(latencyMillis);
       fetchLatencySeeded = true;
     } else {
       fetchLatency = clampFetchLatency(
-          (fetchLatency * (EWMA_DIVISOR - 1) + latencyMillis) / EWMA_DIVISOR);
+          (oldLatency * (EWMA_DIVISOR - 1) + latencyMillis) / EWMA_DIVISOR);
+    }
+    if (TRACE) {
+      traceLogger.info("updateFetchLatency peer={} firstSample={} oldMs={} sampleMs={} newMs={}",
+          channel == null ? "-" : String.valueOf(channel.getInetAddress()),
+          firstSample, oldLatency, latencyMillis, fetchLatency);
     }
   }
 
