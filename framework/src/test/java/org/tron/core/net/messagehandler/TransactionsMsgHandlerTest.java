@@ -391,7 +391,20 @@ public class TransactionsMsgHandlerTest extends BaseTest {
   public void testInvalidSigLength() throws Exception {
     TransactionsMsgHandler handler = new TransactionsMsgHandler();
     handler.init();
+    ExecutorService originalPool = null;
     try {
+      // Mock pool never executes submitted tasks: the async worker would invoke isBadPeer()
+      // on the stubbed peer concurrently with main-thread re-stubbing of getAdvInvRequest(),
+      // and Mockito's per-mock invocationForStubbing state is not thread-safe
+      // (intermittent WrongTypeOfReturnValue: ConcurrentHashMap cannot be returned by
+      // isBadPeer()). This test only asserts the synchronous check() length validation,
+      // so not running the worker is intentional.
+      ExecutorService mockPool = Mockito.mock(ExecutorService.class);
+      Future<?> submittedTask = Mockito.mock(Future.class);
+      Mockito.when(mockPool.submit(Mockito.any(Runnable.class)))
+          .thenAnswer(invocation -> submittedTask);
+      originalPool = replaceTrxHandlePool(handler, mockPool);
+
       PeerConnection peer = Mockito.mock(PeerConnection.class);
 
       BalanceContract.TransferContract transferContract = BalanceContract.TransferContract
@@ -468,7 +481,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
       stubAdvInvRequest(peer, new TransactionsMessage(paddedList));
       handler.processMessage(peer, new TransactionsMessage(paddedList));
     } finally {
-      handler.close();
+      closeHandlerAndOriginalPool(handler, originalPool);
     }
   }
 
