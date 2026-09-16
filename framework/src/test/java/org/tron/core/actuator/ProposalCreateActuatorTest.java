@@ -522,7 +522,7 @@ public class ProposalCreateActuatorTest extends BaseTest {
     paras.put(99L, 1L);
     ContractValidateException e = assertThrows(ContractValidateException.class,
         () -> buildCreateActuator(paras).validate());
-    Assert.assertEquals("Bad chain parameter id [CLOSE_EXCHANGE].", e.getMessage());
+    Assert.assertEquals("Bad chain parameter id [CLOSE_EXCHANGE]", e.getMessage());
   }
 
   /**

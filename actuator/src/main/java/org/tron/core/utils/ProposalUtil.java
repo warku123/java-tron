@@ -950,13 +950,17 @@ public class ProposalUtil {
       }
       case CLOSE_EXCHANGE: {
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
-          throw new ContractValidateException("Bad chain parameter id [CLOSE_EXCHANGE].");
+          throw new ContractValidateException("Bad chain parameter id [CLOSE_EXCHANGE]");
         }
         int current = dynamicPropertiesStore.getCloseExchange();
         // Irreversible by design: CLOSE_EXCHANGE only advances one level at a time.
         if (value == current) {
           throw new ContractValidateException(
               "[CLOSE_EXCHANGE] has been set to " + value + ", no need to propose again");
+        }
+        if (current == 2) {
+          throw new ContractValidateException(
+              "[CLOSE_EXCHANGE] has reached its terminal value 2; no further change is allowed");
         }
         if (value != current + 1 || value < 1 || value > 2) {
           throw new ContractValidateException(

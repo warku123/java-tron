@@ -769,7 +769,7 @@ public class ProposalUtilTest extends BaseTest {
     // 1) fork VERSION_CLOSE_EXCHANGE not passed yet -> rejected, even though 4.8.2 passed
     ContractValidateException thrown = assertThrows(ContractValidateException.class,
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
-    assertEquals("Bad chain parameter id [CLOSE_EXCHANGE].", thrown.getMessage());
+    assertEquals("Bad chain parameter id [CLOSE_EXCHANGE]", thrown.getMessage());
 
     // 2) before the fork, legacy EXCHANGE_CREATE_FEE is still proposable
     try {
@@ -793,6 +793,16 @@ public class ProposalUtilTest extends BaseTest {
     thrown = assertThrows(ContractValidateException.class,
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, hardenExchangeCode, 0));
     assertEquals(BAD_PARAM_ID_MESSAGE, thrown.getMessage());
+
+    // negative control: an unrelated parameter must stay proposable after the fork -
+    // only codes 12/98 are restricted by VERSION_CLOSE_EXCHANGE
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils,
+          ProposalType.ENERGY_FEE.getCode(), 100L);
+    } catch (ContractValidateException e) {
+      Assert.fail("ENERGY_FEE must stay proposable after VERSION_CLOSE_EXCHANGE: "
+          + e.getMessage());
+    }
 
     // 5) stepwise progression from current=0: jump to 2 is rejected
     thrown = assertThrows(ContractValidateException.class,
@@ -846,7 +856,9 @@ public class ProposalUtilTest extends BaseTest {
     // 10) current=2 is final: both lower and upper values are rejected, no level 3 exists
     thrown = assertThrows(ContractValidateException.class,
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
-    assertEquals("This value[CLOSE_EXCHANGE] must be 3 and within [1,2]", thrown.getMessage());
+    assertEquals(
+        "[CLOSE_EXCHANGE] has reached its terminal value 2; no further change is allowed",
+        thrown.getMessage());
 
     thrown = assertThrows(ContractValidateException.class,
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 2));
