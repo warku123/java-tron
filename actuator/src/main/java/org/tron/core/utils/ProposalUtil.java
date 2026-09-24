@@ -74,7 +74,7 @@ public class ProposalUtil {
       case ENERGY_FEE:
       case EXCHANGE_CREATE_FEE:
         if (proposalType == ProposalType.EXCHANGE_CREATE_FEE
-            && forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+            && forkController.pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
           throw new ContractValidateException("Bad chain parameter id [EXCHANGE_CREATE_FEE]");
         }
         break;
@@ -930,7 +930,7 @@ public class ProposalUtil {
         break;
       }
       case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
-        if (forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+        if (forkController.pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
           throw new ContractValidateException(BAD_PARAM_ID);
         }
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_2)) {
@@ -949,7 +949,7 @@ public class ProposalUtil {
         break;
       }
       case CLOSE_EXCHANGE: {
-        if (!forkController.pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
+        if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
           throw new ContractValidateException("Bad chain parameter id [CLOSE_EXCHANGE]");
         }
         int current = dynamicPropertiesStore.getCloseExchange();

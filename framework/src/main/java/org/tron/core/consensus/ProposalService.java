@@ -90,8 +90,8 @@ public class ProposalService extends ProposalUtil {
         }
         case EXCHANGE_CREATE_FEE: {
           if (manager.getChainBaseManager()
-              .getForkController().pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
-            // Exchange creation is closed after VERSION_CLOSE_EXCHANGE; skip this entry
+              .getForkController().pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
+            // Exchange creation is closed after VERSION_4_8_3; skip this entry
             // but keep processing the remaining parameters in the same proposal.
             break;
           }
@@ -425,8 +425,8 @@ public class ProposalService extends ProposalUtil {
         }
         case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
           if (manager.getChainBaseManager()
-              .getForkController().pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE)) {
-            // This parameter is rejected at creation after VERSION_CLOSE_EXCHANGE; skip
+              .getForkController().pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
+            // This parameter is rejected at creation after VERSION_4_8_3; skip
             // application here but keep processing the remaining parameters in the
             // same proposal (historical replay before the fork is unaffected).
             break;

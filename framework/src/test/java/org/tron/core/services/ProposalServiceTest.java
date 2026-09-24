@@ -233,7 +233,7 @@ public class ProposalServiceTest extends BaseTest {
   }
 
   /**
-   * Before VERSION_CLOSE_EXCHANGE, EXCHANGE_CREATE_FEE(12) and
+   * Before VERSION_4_8_3, EXCHANGE_CREATE_FEE(12) and
    * ALLOW_HARDEN_EXCHANGE_CALCULATION(98) proposals apply as before; after the fork their
    * application becomes a no-op while unrelated parameters of the same proposal still apply.
    * Historical pre-fork applications are preserved (the stored value is never reverted).
@@ -281,25 +281,25 @@ public class ProposalServiceTest extends BaseTest {
   }
 
   /**
-   * VERSION_CLOSE_EXCHANGE uses hardForkTime=0 (first maintenance interval) and rate 100
-   * (all 27 stats slots required).
+   * VERSION_4_8_3: hardForkTime is long past, so the next maintenance interval activates
+   * it; filling all 27 stats slots satisfies the rate threshold.
    */
   private void activateCloseExchangeFork() {
     long maintenanceTimeInterval = dps().getMaintenanceTimeInterval();
     long hardForkTime =
-        ((ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getHardForkTime() - 1)
+        ((ForkBlockVersionEnum.VERSION_4_8_3.getHardForkTime() - 1)
             / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
     dps().saveLatestBlockHeaderTimestamp(hardForkTime + 1);
     byte[] stats = new byte[27];
     Arrays.fill(stats, (byte) 1);
-    dps().statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), stats);
+    dps().statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), stats);
     Assert.assertTrue(dbManager.getChainBaseManager().getForkController()
-        .pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE));
+        .pass(ForkBlockVersionEnum.VERSION_4_8_3));
   }
 
   private void deactivateCloseExchangeFork() {
     dps().saveLatestBlockHeaderTimestamp(1000000);
-    dps().statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), new byte[27]);
+    dps().statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), new byte[27]);
   }
 
 }

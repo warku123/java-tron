@@ -752,21 +752,14 @@ public class ProposalUtilTest extends BaseTest {
    * the legacy exchange parameters 12 (EXCHANGE_CREATE_FEE) and 98
    * (ALLOW_HARDEN_EXCHANGE_CALCULATION).
    * Runs after testAllowHardenExchangeCalculationProposal, so VERSION_4_8_2 has passed but
-   * VERSION_CLOSE_EXCHANGE has not when this method starts.
+   * VERSION_4_8_3 has not when this method starts.
    */
   private void testCloseExchangeProposal() {
     long code = ProposalType.CLOSE_EXCHANGE.getCode();
     long exchangeCreateFeeCode = ProposalType.EXCHANGE_CREATE_FEE.getCode();
     long hardenExchangeCode = ProposalType.ALLOW_HARDEN_EXCHANGE_CALCULATION.getCode();
 
-    // This branch intentionally ships VERSION_CLOSE_EXCHANGE above BLOCK_VERSION (see the
-    // NOTE in Parameter.java): the fork is inert until the activation release bumps
-    // BLOCK_VERSION. assert the inertness invariant instead of readiness.
-    Assert.assertTrue("VERSION_CLOSE_EXCHANGE must stay above BLOCK_VERSION (inert)",
-        Parameter.ChainConstant.BLOCK_VERSION
-            < ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue());
-
-    // 1) fork VERSION_CLOSE_EXCHANGE not passed yet -> rejected, even though 4.8.2 passed
+    // 1) fork VERSION_4_8_3 not passed yet -> rejected, even though 4.8.2 passed
     ContractValidateException thrown = assertThrows(ContractValidateException.class,
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
     assertEquals("Bad chain parameter id [CLOSE_EXCHANGE]", thrown.getMessage());
@@ -776,13 +769,13 @@ public class ProposalUtilTest extends BaseTest {
       ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
           1024_000_000L);
     } catch (ContractValidateException e) {
-      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable before VERSION_CLOSE_EXCHANGE: "
+      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable before VERSION_4_8_3: "
           + e.getMessage());
     }
 
-    // 3) activate VERSION_CLOSE_EXCHANGE (hardForkTime=0 -> first maintenance interval,
-    //    rate 100 -> all stats bytes required)
-    activateFork(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE);
+    // 3) activate VERSION_4_8_3 (hardForkTime is long past, so the next maintenance
+    //    interval activates it; filling all stats slots satisfies the rate threshold)
+    activateFork(ForkBlockVersionEnum.VERSION_4_8_3);
 
     // 4) after the fork, legacy exchange parameters are rejected at creation
     thrown = assertThrows(ContractValidateException.class,
@@ -795,12 +788,12 @@ public class ProposalUtilTest extends BaseTest {
     assertEquals(BAD_PARAM_ID_MESSAGE, thrown.getMessage());
 
     // negative control: an unrelated parameter must stay proposable after the fork -
-    // only codes 12/98 are restricted by VERSION_CLOSE_EXCHANGE
+    // only codes 12/98 are restricted by VERSION_4_8_3
     try {
       ProposalUtil.validator(dynamicPropertiesStore, forkUtils,
           ProposalType.ENERGY_FEE.getCode(), 100L);
     } catch (ContractValidateException e) {
-      Assert.fail("ENERGY_FEE must stay proposable after VERSION_CLOSE_EXCHANGE: "
+      Assert.fail("ENERGY_FEE must stay proposable after VERSION_4_8_3: "
           + e.getMessage());
     }
 
@@ -914,13 +907,6 @@ public class ProposalUtilTest extends BaseTest {
   @Test
   public void blockVersionCheck() {
     for (ForkBlockVersionEnum forkVersion : ForkBlockVersionEnum.values()) {
-      // VERSION_CLOSE_EXCHANGE is intentionally above BLOCK_VERSION on this branch (inert
-      // until the activation release); every other fork must be within BLOCK_VERSION.
-      if (forkVersion == ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE) {
-        Assert.assertTrue("VERSION_CLOSE_EXCHANGE must stay above BLOCK_VERSION (inert)",
-            forkVersion.getValue() > Parameter.ChainConstant.BLOCK_VERSION);
-        continue;
-      }
       if (forkVersion.getValue() > Parameter.ChainConstant.BLOCK_VERSION) {
         Assert.fail("ForkBlockVersion must be less than BLOCK_VERSION");
       }

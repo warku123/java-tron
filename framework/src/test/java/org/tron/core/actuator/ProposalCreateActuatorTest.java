@@ -513,7 +513,7 @@ public class ProposalCreateActuatorTest extends BaseTest {
 
   /**
    * A single-parameter CLOSE_EXCHANGE proposal passes the constraint check and reaches the
-   * per-value validation, which rejects it while the VERSION_CLOSE_EXCHANGE fork is not
+   * per-value validation, which rejects it while the VERSION_4_8_3 fork is not
    * passed yet.
    */
   @Test
@@ -559,28 +559,28 @@ public class ProposalCreateActuatorTest extends BaseTest {
   }
 
   /**
-   * VERSION_CLOSE_EXCHANGE: hardForkTime=0 (first maintenance interval), rate 100 (all
-   * stats slots required).
+   * VERSION_4_8_3: hardForkTime is long past, so the next maintenance interval activates
+   * it; filling all stats slots satisfies the rate threshold.
    */
   private void activateCloseExchangeFork() {
     long maintenanceTimeInterval =
         dbManager.getDynamicPropertiesStore().getMaintenanceTimeInterval();
     long hardForkTime =
-        ((ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getHardForkTime() - 1)
+        ((ForkBlockVersionEnum.VERSION_4_8_3.getHardForkTime() - 1)
             / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(hardForkTime + 1);
     byte[] stats = new byte[27];
     Arrays.fill(stats, (byte) 1);
     dbManager.getDynamicPropertiesStore()
-        .statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), stats);
+        .statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), stats);
     Assert.assertTrue(ForkController.instance()
-        .pass(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE));
+        .pass(ForkBlockVersionEnum.VERSION_4_8_3));
   }
 
   private void deactivateCloseExchangeFork() {
     dbManager.getDynamicPropertiesStore().saveLatestBlockHeaderTimestamp(1000000);
     dbManager.getDynamicPropertiesStore()
-        .statsByVersion(ForkBlockVersionEnum.VERSION_CLOSE_EXCHANGE.getValue(), new byte[27]);
+        .statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), new byte[27]);
   }
 
 }
