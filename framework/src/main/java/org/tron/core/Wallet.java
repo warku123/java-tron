@@ -1524,7 +1524,6 @@ public class Wallet {
         .setValue(dbManager.getDynamicPropertiesStore().getAllowHardenExchangeCalculation())
         .build());
 
-    //    CLOSE_EXCHANGE, // 0, 1, 2, 99
     builder.addChainParameter(Protocol.ChainParameters.ChainParameter.newBuilder()
         .setKey("getCloseExchange")
         .setValue(dbManager.getDynamicPropertiesStore().getCloseExchange())
