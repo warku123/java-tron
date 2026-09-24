@@ -89,10 +89,10 @@ public class ProposalService extends ProposalUtil {
           break;
         }
         case EXCHANGE_CREATE_FEE: {
-          if (manager.getChainBaseManager()
-              .getForkController().pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
-            // Exchange creation is closed after VERSION_4_8_3; skip this entry
-            // but keep processing the remaining parameters in the same proposal.
+          if (manager.getDynamicPropertiesStore().getCloseExchange() >= 1) {
+            // Exchange creation is locked once the close level reaches 1; skip
+            // this entry but keep processing the remaining parameters in the same
+            // proposal (level 0 application is unaffected).
             break;
           }
           manager.getDynamicPropertiesStore().saveExchangeCreateFee(entry.getValue());
@@ -424,11 +424,10 @@ public class ProposalService extends ProposalUtil {
           break;
         }
         case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
-          if (manager.getChainBaseManager()
-              .getForkController().pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
-            // This parameter is rejected at creation after VERSION_4_8_3; skip
-            // application here but keep processing the remaining parameters in the
-            // same proposal (historical replay before the fork is unaffected).
+          if (manager.getDynamicPropertiesStore().getCloseExchange() >= 1) {
+            // This parameter is rejected at creation once the close level
+            // reaches 1; skip application here but keep processing the remaining
+            // parameters in the same proposal (level 0 application is unaffected).
             break;
           }
           manager.getDynamicPropertiesStore()

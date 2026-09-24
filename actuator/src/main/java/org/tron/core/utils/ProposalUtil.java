@@ -74,7 +74,9 @@ public class ProposalUtil {
       case ENERGY_FEE:
       case EXCHANGE_CREATE_FEE:
         if (proposalType == ProposalType.EXCHANGE_CREATE_FEE
-            && forkController.pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
+            && dynamicPropertiesStore.getCloseExchange() >= 1) {
+          // Exchange creation is locked once the close level reaches 1;
+          // at level 0 the parameter stays freely proposable.
           throw new ContractValidateException("Bad chain parameter id [EXCHANGE_CREATE_FEE]");
         }
         break;
@@ -930,7 +932,9 @@ public class ProposalUtil {
         break;
       }
       case ALLOW_HARDEN_EXCHANGE_CALCULATION: {
-        if (forkController.pass(ForkBlockVersionEnum.VERSION_4_8_3)) {
+        if (dynamicPropertiesStore.getCloseExchange() >= 1) {
+          // Locked once the close level reaches 1; at level 0 the parameter
+          // stays freely proposable (subject to the VERSION_4_8_2 check below).
           throw new ContractValidateException(BAD_PARAM_ID);
         }
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_2)) {

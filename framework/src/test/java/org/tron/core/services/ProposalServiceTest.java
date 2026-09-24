@@ -7,7 +7,6 @@ import static org.tron.core.utils.ProposalUtil.ProposalType.PROPOSAL_EXPIRE_TIME
 import static org.tron.core.utils.ProposalUtil.ProposalType.TRANSACTION_FEE;
 import static org.tron.core.utils.ProposalUtil.ProposalType.WITNESS_127_PAY_PER_BLOCK;
 
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
@@ -19,7 +18,6 @@ import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.capsule.ProposalCapsule;
-import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ProposalService;
 import org.tron.core.store.DynamicPropertiesStore;
@@ -233,14 +231,17 @@ public class ProposalServiceTest extends BaseTest {
   }
 
   /**
-   * Before VERSION_4_8_3, EXCHANGE_CREATE_FEE(12) and
-   * ALLOW_HARDEN_EXCHANGE_CALCULATION(98) proposals apply as before; after the fork their
-   * application becomes a no-op while unrelated parameters of the same proposal still apply.
-   * Historical pre-fork applications are preserved (the stored value is never reverted).
+   * While the close level is 0, EXCHANGE_CREATE_FEE(12) and
+   * ALLOW_HARDEN_EXCHANGE_CALCULATION(98) proposals apply as before; once the level
+   * reaches 1 their application becomes a no-op while unrelated parameters of the same
+   * proposal still apply. Historical level-0 applications are preserved (the stored
+   * value is never reverted).
    */
   @Test
-  public void testApplyLegacyExchangeParametersAroundFork() {
-    // pre-fork: both legacy parameters still apply
+  public void testApplyLegacyExchangeParametersAroundCloseLevel() {
+    // ensure level 0: prior tests in this class may have left the level raised
+    dps().saveCloseExchange(0);
+    // close level 0: both legacy parameters still apply
     dps().saveExchangeCreateFee(1024_000_000L);
     dps().saveAllowHardenExchangeCalculation(0);
     apply(EXCHANGE_CREATE_FEE_CODE, 2_048_000_000L);
@@ -248,14 +249,15 @@ public class ProposalServiceTest extends BaseTest {
     apply(HARDEN_EXCHANGE_CODE, 1);
     Assert.assertEquals(1, dps().getAllowHardenExchangeCalculation());
 
-    activateCloseExchangeFork();
+    dps().saveCloseExchange(1);
     try {
-      // post-fork: legacy exchange parameters are skipped...
+      // close level >= 1: legacy exchange parameters are skipped...
       apply(EXCHANGE_CREATE_FEE_CODE, 3_072_000_000L);
-      Assert.assertEquals("EXCHANGE_CREATE_FEE must not be applied after the fork",
+      Assert.assertEquals("EXCHANGE_CREATE_FEE must not be applied at close level >= 1",
           2_048_000_000L, dps().getExchangeCreateFee());
       apply(HARDEN_EXCHANGE_CODE, 0);
-      Assert.assertEquals("ALLOW_HARDEN_EXCHANGE_CALCULATION must not be applied after the fork",
+      Assert.assertEquals("ALLOW_HARDEN_EXCHANGE_CALCULATION must not be applied at "
+              + "close level >= 1",
           1, dps().getAllowHardenExchangeCalculation());
 
       // ...without blocking unrelated parameters of the same proposal
@@ -270,36 +272,14 @@ public class ProposalServiceTest extends BaseTest {
       Assert.assertEquals(1, dps().getAllowHardenExchangeCalculation());
       Assert.assertEquals(5000L, dps().getCreateAccountFee());
 
-      // CLOSE_EXCHANGE application itself still works after the fork
+      // CLOSE_EXCHANGE application itself still works at close level >= 1
       dps().saveCloseExchange(0);
       apply(CLOSE_EXCHANGE_CODE, 1);
       Assert.assertEquals(1, dps().getCloseExchange());
     } finally {
-      deactivateCloseExchangeFork();
+      dps().saveCloseExchange(0);
       dps().saveAllowHardenExchangeCalculation(0);
     }
-  }
-
-  /**
-   * VERSION_4_8_3: hardForkTime is long past, so the next maintenance interval activates
-   * it; filling all 27 stats slots satisfies the rate threshold.
-   */
-  private void activateCloseExchangeFork() {
-    long maintenanceTimeInterval = dps().getMaintenanceTimeInterval();
-    long hardForkTime =
-        ((ForkBlockVersionEnum.VERSION_4_8_3.getHardForkTime() - 1)
-            / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
-    dps().saveLatestBlockHeaderTimestamp(hardForkTime + 1);
-    byte[] stats = new byte[27];
-    Arrays.fill(stats, (byte) 1);
-    dps().statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), stats);
-    Assert.assertTrue(dbManager.getChainBaseManager().getForkController()
-        .pass(ForkBlockVersionEnum.VERSION_4_8_3));
-  }
-
-  private void deactivateCloseExchangeFork() {
-    dps().saveLatestBlockHeaderTimestamp(1000000);
-    dps().statsByVersion(ForkBlockVersionEnum.VERSION_4_8_3.getValue(), new byte[27]);
   }
 
 }

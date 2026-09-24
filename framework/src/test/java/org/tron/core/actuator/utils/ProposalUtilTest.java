@@ -38,7 +38,6 @@ public class ProposalUtilTest extends BaseTest {
   private static final long LONG_VALUE = 100_000_000_000_000_000L;
   private static final String LONG_VALUE_ERROR =
       "Bad chain parameter value, valid range is [0," + LONG_VALUE + "]";
-  private static final String BAD_PARAM_ID_MESSAGE = "Bad chain parameter id";
 
   @Resource
   private DynamicPropertiesStore dynamicPropertiesStore;
@@ -748,9 +747,10 @@ public class ProposalUtilTest extends BaseTest {
   }
 
   /**
-   * CLOSE_EXCHANGE(99): fork gate, step-by-step progression, and the post-fork rejection of
+   * CLOSE_EXCHANGE(99): fork gate, step-by-step progression, and the close-level lockout of
    * the legacy exchange parameters 12 (EXCHANGE_CREATE_FEE) and 98
-   * (ALLOW_HARDEN_EXCHANGE_CALCULATION).
+   * (ALLOW_HARDEN_EXCHANGE_CALCULATION): freely proposable at level 0, rejected once the
+   * level reaches 1.
    * Runs after testAllowHardenExchangeCalculationProposal, so VERSION_4_8_2 has passed but
    * VERSION_4_8_3 has not when this method starts.
    */
@@ -764,12 +764,12 @@ public class ProposalUtilTest extends BaseTest {
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
     assertEquals("Bad chain parameter id [CLOSE_EXCHANGE]", thrown.getMessage());
 
-    // 2) before the fork, legacy EXCHANGE_CREATE_FEE is still proposable
+    // 2) at close level 0, legacy EXCHANGE_CREATE_FEE is still proposable
     try {
       ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
           1024_000_000L);
     } catch (ContractValidateException e) {
-      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable before VERSION_4_8_3: "
+      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable at close level 0: "
           + e.getMessage());
     }
 
@@ -777,24 +777,28 @@ public class ProposalUtilTest extends BaseTest {
     //    interval activates it; filling all stats slots satisfies the rate threshold)
     activateFork(ForkBlockVersionEnum.VERSION_4_8_3);
 
-    // 4) after the fork, legacy exchange parameters are rejected at creation
-    thrown = assertThrows(ContractValidateException.class,
-        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
-            1024_000_000L));
-    assertEquals("Bad chain parameter id [EXCHANGE_CREATE_FEE]", thrown.getMessage());
+    // 3b) passing the fork alone must NOT lock the legacy exchange parameters -
+    // lockout is driven by the close level, which is still 0 here
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
+          1024_000_000L);
+    } catch (ContractValidateException e) {
+      Assert.fail("EXCHANGE_CREATE_FEE must stay proposable while close level is 0: "
+          + e.getMessage());
+    }
+    try {
+      ProposalUtil.validator(dynamicPropertiesStore, forkUtils, hardenExchangeCode, 0);
+    } catch (ContractValidateException e) {
+      Assert.fail("ALLOW_HARDEN_EXCHANGE_CALCULATION must stay proposable while close "
+          + "level is 0: " + e.getMessage());
+    }
 
-    thrown = assertThrows(ContractValidateException.class,
-        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, hardenExchangeCode, 0));
-    assertEquals(BAD_PARAM_ID_MESSAGE, thrown.getMessage());
-
-    // negative control: an unrelated parameter must stay proposable after the fork -
-    // only codes 12/98 are restricted by VERSION_4_8_3
+    // negative control: an unrelated parameter stays proposable regardless
     try {
       ProposalUtil.validator(dynamicPropertiesStore, forkUtils,
           ProposalType.ENERGY_FEE.getCode(), 100L);
     } catch (ContractValidateException e) {
-      Assert.fail("ENERGY_FEE must stay proposable after VERSION_4_8_3: "
-          + e.getMessage());
+      Assert.fail("ENERGY_FEE must stay proposable: " + e.getMessage());
     }
 
     // 5) stepwise progression from current=0: jump to 2 is rejected
@@ -831,6 +835,16 @@ public class ProposalUtilTest extends BaseTest {
         () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, code, 1));
     assertEquals("[CLOSE_EXCHANGE] has been set to 1, no need to propose again",
         thrown.getMessage());
+
+    // 8b) once the close level reaches 1, legacy exchange parameters are locked out
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, exchangeCreateFeeCode,
+            1024_000_000L));
+    assertEquals("Bad chain parameter id [EXCHANGE_CREATE_FEE]", thrown.getMessage());
+
+    thrown = assertThrows(ContractValidateException.class,
+        () -> ProposalUtil.validator(dynamicPropertiesStore, forkUtils, hardenExchangeCode, 0));
+    assertEquals("Bad chain parameter id", thrown.getMessage());
 
     // 9) current=1 -> only value 2 passes
     thrown = assertThrows(ContractValidateException.class,

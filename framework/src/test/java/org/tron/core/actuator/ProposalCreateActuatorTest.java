@@ -526,6 +526,28 @@ public class ProposalCreateActuatorTest extends BaseTest {
   }
 
   /**
+   * While the close level is 0, a multi-parameter batch containing
+   * EXCHANGE_CREATE_FEE still validates and executes; the lockout only kicks in at
+   * close level >= 1.
+   */
+  @Test
+  public void exchangeCreateFeeBatchSucceedsAtCloseLevelZero() {
+    HashMap<Long, Long> paras = new HashMap<>();
+    paras.put(12L, 1024_000_000L); // EXCHANGE_CREATE_FEE
+    paras.put(0L, 1000000L);       // CREATE_ACCOUNT_FEE
+    ProposalCreateActuator actuator = buildCreateActuator(paras);
+    TransactionResultCapsule ret = new TransactionResultCapsule();
+    try {
+      actuator.validate();
+      actuator.execute(ret);
+    } catch (Exception ex) {
+      Assert.fail("batch containing EXCHANGE_CREATE_FEE must succeed at close level 0: "
+          + ex.getMessage());
+    }
+    Assert.assertEquals(code.SUCESS, ret.getInstance().getRet());
+  }
+
+  /**
    * After the fork, a single-parameter CLOSE_EXCHANGE proposal validates and executes.
    */
   @Test
