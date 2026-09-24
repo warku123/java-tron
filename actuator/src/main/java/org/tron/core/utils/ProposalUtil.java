@@ -72,14 +72,15 @@ public class ProposalUtil {
         break;
       }
       case ENERGY_FEE:
-      case EXCHANGE_CREATE_FEE:
-        if (proposalType == ProposalType.EXCHANGE_CREATE_FEE
-            && dynamicPropertiesStore.getCloseExchange() >= 1) {
+        break;
+      case EXCHANGE_CREATE_FEE: {
+        if (dynamicPropertiesStore.getCloseExchange() >= 1) {
           // Exchange creation is locked once the close level reaches 1;
           // at level 0 the parameter stays freely proposable.
           throw new ContractValidateException("Bad chain parameter id [EXCHANGE_CREATE_FEE]");
         }
         break;
+      }
       case MAX_CPU_TIME_OF_ONE_TX:
         if (dynamicPropertiesStore.getAllowHigherLimitForMaxCpuTimeOfOneTx() == 1) {
           if (value < 10 || value > 400) {

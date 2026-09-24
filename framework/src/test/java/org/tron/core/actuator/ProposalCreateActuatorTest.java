@@ -515,6 +515,37 @@ public class ProposalCreateActuatorTest extends BaseTest {
   }
 
   /**
+   * At close level 1, an ENERGY_FEE proposal is unaffected by the exchange close
+   * guard, while an EXCHANGE_CREATE_FEE proposal is rejected.
+   */
+  @Test
+  public void energyFeeProposalUnaffectedByExchangeClose() {
+    dbManager.getDynamicPropertiesStore().saveCloseExchange(1);
+    try {
+      HashMap<Long, Long> paras = new HashMap<>();
+      paras.put(11L, 100L); // ENERGY_FEE
+      ProposalCreateActuator actuator = buildCreateActuator(paras);
+      TransactionResultCapsule ret = new TransactionResultCapsule();
+      try {
+        actuator.validate();
+        actuator.execute(ret);
+      } catch (Exception ex) {
+        Assert.fail("ENERGY_FEE proposal must succeed at close level 1: "
+            + ex.getMessage());
+      }
+      Assert.assertEquals(code.SUCESS, ret.getInstance().getRet());
+
+      HashMap<Long, Long> exchangeParas = new HashMap<>();
+      exchangeParas.put(12L, 1024_000_000L); // EXCHANGE_CREATE_FEE
+      ContractValidateException e = assertThrows(ContractValidateException.class,
+          () -> buildCreateActuator(exchangeParas).validate());
+      Assert.assertEquals("Bad chain parameter id [EXCHANGE_CREATE_FEE]", e.getMessage());
+    } finally {
+      dbManager.getDynamicPropertiesStore().saveCloseExchange(0);
+    }
+  }
+
+  /**
    * After the fork, a single-parameter CLOSE_EXCHANGE proposal validates and executes.
    */
   @Test
