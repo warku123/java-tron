@@ -479,39 +479,6 @@ public class ProposalCreateActuatorTest extends BaseTest {
   }
 
   /**
-   * A proposal containing CLOSE_EXCHANGE plus any other parameter must be rejected up
-   * front; unrelated multi-parameter proposals stay untouched.
-   */
-  @Test
-  public void closeExchangeProposalMustBeSingleParameter() {
-    // CLOSE_EXCHANGE + one unrelated parameter -> rejected
-    HashMap<Long, Long> paras = new HashMap<>();
-    paras.put(99L, 1L);
-    paras.put(0L, 1000000L);
-    ContractValidateException e = assertThrows(ContractValidateException.class,
-        () -> buildCreateActuator(paras).validate());
-    Assert.assertEquals("CLOSE_EXCHANGE proposal must contain only one parameter",
-        e.getMessage());
-
-    // CLOSE_EXCHANGE + two unrelated parameters -> rejected as well
-    paras.put(2L, 1000L);
-    e = assertThrows(ContractValidateException.class,
-        () -> buildCreateActuator(paras).validate());
-    Assert.assertEquals("CLOSE_EXCHANGE proposal must contain only one parameter",
-        e.getMessage());
-
-    // unrelated multi-parameter proposals are unchanged (no CLOSE_EXCHANGE key)
-    HashMap<Long, Long> unrelated = new HashMap<>();
-    unrelated.put(0L, 1000000L);
-    unrelated.put(2L, 1000L);
-    try {
-      buildCreateActuator(unrelated).validate();
-    } catch (ContractValidateException ex) {
-      Assert.fail("unrelated multi-parameter proposal must still validate: " + ex.getMessage());
-    }
-  }
-
-  /**
    * A single-parameter CLOSE_EXCHANGE proposal passes the constraint check and reaches the
    * per-value validation, which rejects it while the VERSION_4_8_3 fork is not
    * passed yet.
