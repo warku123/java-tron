@@ -158,7 +158,7 @@ public class ServingIndexFormatTest {
         ArchivePersistenceException.class,
         () ->
             ServingIndexRecordCodec.decodeEpochPage(
-                ServingIndexRecordCodec.encodeEpochPage(epochs(513))));
+                ServingIndexRecordCodec.encodeEpochPage(epochs(6000))));
     assertThrows(
         IllegalArgumentException.class, () -> ServingIndexKeyCodec.keyPageKey("code", RAW, -1));
   }

@@ -22,7 +22,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.stream.Stream;
-import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -57,9 +56,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   /** Single-DB progress descriptor key (exact v5), ch04 §3.2.1. */
   static final byte[] PROGRESS_KEY = new byte[]{0x7f, 'S', 'I', 1};
   private static final int INLINE_EPOCH_LIMIT = ServingIndexRecordCodec.INLINE_EPOCH_LIMIT;
-  private static final int EPOCHS_PER_PAGE = ServingIndexRecordCodec.EPOCHS_PER_PAGE;
   private static final byte INLINE = ServingIndexRecordCodec.INLINE;
-  private static final byte PAGED = ServingIndexRecordCodec.PAGED;
   private static final byte PAGED_DIRECTORY = ServingIndexRecordCodec.PAGED_DIRECTORY;
   private static final byte[] PRESENT = new byte[]{1};
   private static final String MANIFEST = "generation.meta";
@@ -562,7 +559,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
           byte[] directoryKey = Arrays.copyOf(key, key.length);
           directoryKey[0] = ServingIndexKeyCodec.KEY_PAGE_DIRECTORY_PREFIX;
           ServingIndexRecordCodec.decodePageDirectory(database.get(directoryKey),
-              pageCount(meta.count), meta.lastEpoch);
+              meta.count, meta.lastEpoch);
         }
         keyMetadata++;
         changeEntries += meta.count;
@@ -604,7 +601,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
           throw new ArchivePersistenceException("Orphan serving page directory");
         }
         byte[] value = entry.getValue();
-        ServingIndexRecordCodec.decodePageDirectory(value, pageCount(meta.count), meta.lastEpoch);
+        ServingIndexRecordCodec.decodePageDirectory(value, meta.count, meta.lastEpoch);
         logicalBytes += key.length + value.length;
       }
     }
@@ -676,42 +673,32 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     if (meta.mode == INLINE) {
       return firstChange(meta.inlineEpochs, targetBlock, upperBound);
     }
-    int pageCount = pageCount(meta.count);
-    if (meta.mode == PAGED) {
+    if (meta.mode == PAGED_DIRECTORY) {
+      List<ServingIndexRecordCodec.PageDescriptor> pages =
+          ServingIndexRecordCodec.decodePageDirectory(
+              database.get(ServingIndexKeyCodec.keyPageDirectoryKey(dbName, rawKey)),
+              meta.count, meta.lastEpoch);
       int low = 0;
-      int high = pageCount;
+      int high = pages.size();
       while (low < high) {
         int middle = (low + high) >>> 1;
-        if (ServingIndexRecordCodec.lastEpochOf(
-            readPageBytes(dbName, rawKey, middle)) <= targetBlock) {
+        if (pages.get(middle).maxEpoch() <= targetBlock) {
           low = middle + 1;
         } else {
           high = middle;
         }
       }
-      if (low == pageCount) {
-        return OptionalLong.empty();
-      }
-      return bounded(ServingIndexRecordCodec.firstEpochGreaterThan(
-          readPageBytes(dbName, rawKey, low), targetBlock), upperBound);
-    }
-    if (meta.mode == PAGED_DIRECTORY) {
-      long[] pageMaxHeights = ServingIndexRecordCodec.decodePageDirectory(
-          database.get(ServingIndexKeyCodec.keyPageDirectoryKey(dbName, rawKey)),
-          pageCount, meta.lastEpoch);
-      int pageIndex = firstGreaterIndex(pageMaxHeights, targetBlock);
-      if (pageIndex == pageCount) {
+      if (low == pages.size()) {
         throw new ArchivePersistenceException("Serving directory has no successor page");
       }
-      byte[] encodedPage = readPageBytes(dbName, rawKey, pageIndex);
-      int expectedCount = pageIndex == pageCount - 1
-          ? (int) ((meta.count - 1) % EPOCHS_PER_PAGE + 1) : EPOCHS_PER_PAGE;
-      if (ServingIndexRecordCodec.pageEpochCount(encodedPage) != expectedCount
-          || ServingIndexRecordCodec.lastEpochOf(encodedPage) != pageMaxHeights[pageIndex]
-          || (pageIndex == 0
+      ServingIndexRecordCodec.PageDescriptor page = pages.get(low);
+      byte[] encodedPage = readPageBytes(dbName, rawKey, page.pageId());
+      if (ServingIndexRecordCodec.pageEpochCount(encodedPage) != page.entries()
+          || ServingIndexRecordCodec.lastEpochOf(encodedPage) != page.maxEpoch()
+          || (low == 0
               ? ServingIndexRecordCodec.firstEpochOf(encodedPage) != meta.firstEpoch
               : ServingIndexRecordCodec.firstEpochOf(encodedPage)
-                  <= pageMaxHeights[pageIndex - 1])) {
+                  <= pages.get(low - 1).maxEpoch())) {
         throw new ArchivePersistenceException("Serving directory differs from its page");
       }
       return bounded(ServingIndexRecordCodec.firstEpochGreaterThan(
@@ -1199,7 +1186,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       if (meta.mode == PAGED_DIRECTORY) {
         ServingIndexRecordCodec.decodePageDirectory(target.get(
             ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey)),
-            pageCount(meta.count), meta.lastEpoch);
+            meta.count, meta.lastEpoch);
       }
       appended = appended.subList(1, appended.size());
       if (appended.isEmpty()) {
@@ -1213,10 +1200,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
             encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
         return;
       }
-      Map<Integer, Long> rewrittenPageMaxHeights = new LinkedHashMap<>();
-      writeAllPages(batch, key, appended, 0, rewrittenPageMaxHeights);
-      appendDirectory(target, batch, key, null, appended.size(),
-          appended.get(appended.size() - 1), rewrittenPageMaxHeights);
+      writePagedChanges(target, batch, key, null, appended);
       batch.add(ArchiveIndexStorage.put(metaKey,
           encodeKeyMeta(KeyMeta.paged(appended.size(), appended.get(0),
               appended.get(appended.size() - 1)))));
@@ -1230,104 +1214,80 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
           encodeKeyMeta(KeyMeta.inline(toArray(combined)))));
       return;
     }
-    long newCount = meta.count + appended.size();
-    if (newCount > (long) Integer.MAX_VALUE * EPOCHS_PER_PAGE) {
-      throw new ArchivePersistenceException("Serving page count exceeds addressable range");
-    }
-    Map<Integer, Long> rewrittenPageMaxHeights = new LinkedHashMap<>();
     if (meta.mode == INLINE) {
       List<Long> combined = asList(meta.inlineEpochs);
       combined.addAll(appended);
-      writeAllPages(batch, key, combined, 0, rewrittenPageMaxHeights);
+      writePagedChanges(target, batch, key, null, combined);
     } else {
-      if (meta.count % EPOCHS_PER_PAGE == 0) {
-        // A full previous page is immutable; do not read or rewrite it merely to append.
-        writeAllPages(batch, key, appended, pageCount(meta.count), rewrittenPageMaxHeights);
-      } else {
-        // Geth-aligned tail append: reuse the encoded prefix, never decode the old page.
-        int lastPageIndex = pageCount(meta.count) - 1;
-        long tailStarted = System.nanoTime();
-        byte[] encodedPage;
-        try {
-          encodedPage = target.get(keyPageKey(key.dbName, key.rawKey, lastPageIndex));
-        } finally {
-          ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, tailStarted);
-        }
-        int tailCount = (int) ((meta.count - 1) % EPOCHS_PER_PAGE + 1);
-        int fit = StrictMathWrapper.min(appended.size(), EPOCHS_PER_PAGE - tailCount);
-        batch.add(ArchiveIndexStorage.put(keyPageKey(key.dbName, key.rawKey, lastPageIndex),
-            ServingIndexRecordCodec.appendEpochPage(encodedPage,
-                appended.subList(0, fit), tailCount, meta.lastEpoch)));
-        rewrittenPageMaxHeights.put(lastPageIndex, appended.get(fit - 1));
-        if (appended.size() > fit) {
-          writeAllPages(batch, key, appended.subList(fit, appended.size()),
-              lastPageIndex + 1, rewrittenPageMaxHeights);
-        }
-      }
+      writePagedChanges(target, batch, key, meta, appended);
     }
-    appendDirectory(target, batch, key, meta, newCount,
-        appended.get(appended.size() - 1), rewrittenPageMaxHeights);
     batch.add(ArchiveIndexStorage.put(metaKey,
-        encodeKeyMeta(KeyMeta.paged(newCount,
+        encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),
             meta.firstEpoch, appended.get(appended.size() - 1)))));
   }
 
-  private static void writeAllPages(List<ArchiveIndexStorage.Mutation> batch,
-      ExactKey key, List<Long> epochs, int firstPageIndex,
-      Map<Integer, Long> rewrittenPageMaxHeights) {
-    for (int start = 0, page = firstPageIndex; start < epochs.size();
-        start += EPOCHS_PER_PAGE, page++) {
-      int end = StrictMathWrapper.min(start + EPOCHS_PER_PAGE, epochs.size());
-      batch.add(ArchiveIndexStorage.put(keyPageKey(key.dbName, key.rawKey, page),
-          encodeEpochPage(toArray(epochs.subList(start, end)))));
-      rewrittenPageMaxHeights.put(page, epochs.get(end - 1));
-    }
-  }
-
-  /** Directory, rewritten pages and KeyMeta are always emitted into the same key-atomic group. */
-  private static void appendDirectory(ArchiveIndexStorage.Writer target,
+  /**
+   * Pages, directory and KeyMeta stay in one key-atomic group (S-INV-13). Pages roll on the
+   * Geth byte estimate checked before each append, so page boundaries depend only on the
+   * appended heights, never on how commits batched them; a full previous page is immutable
+   * and is neither read as a tail nor rewritten here.
+   */
+  private static void writePagedChanges(ArchiveIndexStorage.Writer target,
       List<ArchiveIndexStorage.Mutation> batch, ExactKey key, KeyMeta previous,
-      long count, long lastEpoch, Map<Integer, Long> rewrittenPageMaxHeights) throws IOException {
-    int newPageCount = pageCount(count);
-    if (newPageCount < ServingIndexRecordCodec.DIRECTORY_MIN_PAGES) {
-      return;
-    }
+      List<Long> epochs) throws IOException {
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey);
-    long[] pageMaxHeights = new long[newPageCount];
-    int previousPageCount = previous == null || previous.mode == INLINE
-        ? 0 : pageCount(previous.count);
-    if (previous != null && previous.mode == PAGED_DIRECTORY) {
-      long[] previousPageMaxHeights = ServingIndexRecordCodec.decodePageDirectory(
-          target.get(directoryKey), previousPageCount, previous.lastEpoch);
-      System.arraycopy(previousPageMaxHeights, 0, pageMaxHeights, 0,
-          previousPageMaxHeights.length);
+    List<ServingIndexRecordCodec.PageDescriptor> pages;
+    ServingIndexRecordCodec.PageWriter writer;
+    int pageId;
+    if (previous == null) {
+      pages = new ArrayList<>();
+      writer = new ServingIndexRecordCodec.PageWriter();
+      pageId = 0;
     } else {
-      // First directory: read only the anchor/last heights of pages not rewritten here.
-      for (int index = 0; index < previousPageCount; index++) {
-        if (!rewrittenPageMaxHeights.containsKey(index)) {
-          byte[] encodedPage = target.get(keyPageKey(key.dbName, key.rawKey, index));
-          int expectedCount = index == previousPageCount - 1
-              ? (int) ((previous.count - 1) % EPOCHS_PER_PAGE + 1) : EPOCHS_PER_PAGE;
-          if (ServingIndexRecordCodec.pageEpochCount(encodedPage) != expectedCount
-              || index == 0
-                  && ServingIndexRecordCodec.firstEpochOf(encodedPage) != previous.firstEpoch
-              || index == previousPageCount - 1
-                  && ServingIndexRecordCodec.lastEpochOf(encodedPage) != previous.lastEpoch
-              || index > 0
-                  && ServingIndexRecordCodec.firstEpochOf(encodedPage)
-                      <= pageMaxHeights[index - 1]) {
-            throw new ArchivePersistenceException("Serving page differs from metadata");
-          }
-          pageMaxHeights[index] = ServingIndexRecordCodec.lastEpochOf(encodedPage);
-        }
+      pages = ServingIndexRecordCodec.decodePageDirectory(
+          target.get(directoryKey), previous.count, previous.lastEpoch);
+      ServingIndexRecordCodec.PageDescriptor tail = pages.remove(pages.size() - 1);
+      pageId = tail.pageId();
+      long tailStarted = System.nanoTime();
+      byte[] encodedTail;
+      try {
+        encodedTail = target.get(keyPageKey(key.dbName, key.rawKey, pageId));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, tailStarted);
+      }
+      writer = new ServingIndexRecordCodec.PageWriter(encodedTail, tail);
+      if (writer.isFull()) {
+        pages.add(tail);
+        pageId = requireNextPageId(pageId);
+        writer = new ServingIndexRecordCodec.PageWriter();
       }
     }
-    rewrittenPageMaxHeights.forEach((index, maxHeight) -> pageMaxHeights[index] = maxHeight);
-    if (pageMaxHeights[newPageCount - 1] != lastEpoch) {
-      throw new ArchivePersistenceException("Serving append directory endpoint differs");
+    for (long epoch : epochs) {
+      if (writer.isFull()) {
+        emitPage(batch, key, writer, pageId, pages);
+        pageId = requireNextPageId(pageId);
+        writer = new ServingIndexRecordCodec.PageWriter();
+      }
+      writer.append(epoch);
     }
+    emitPage(batch, key, writer, pageId, pages);
     batch.add(ArchiveIndexStorage.put(directoryKey,
-        ServingIndexRecordCodec.encodePageDirectory(pageMaxHeights, count)));
+        ServingIndexRecordCodec.encodePageDirectory(pages)));
+  }
+
+  private static void emitPage(List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
+      ServingIndexRecordCodec.PageWriter writer, int pageId,
+      List<ServingIndexRecordCodec.PageDescriptor> pages) {
+    batch.add(ArchiveIndexStorage.put(
+        keyPageKey(key.dbName, key.rawKey, pageId), writer.finish()));
+    pages.add(writer.descriptor(pageId));
+  }
+
+  private static int requireNextPageId(int pageId) {
+    if (pageId == Integer.MAX_VALUE) {
+      throw new ArchivePersistenceException("Serving page count exceeds addressable range");
+    }
+    return pageId + 1;
   }
 
   static byte[] keyMetaKey(String dbName, byte[] rawKey) {
@@ -1352,10 +1312,6 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
 
   private static KeyMeta decodeKeyMeta(byte[] encoded) {
     return ServingIndexRecordCodec.decodeKeyMeta(encoded, KeyMeta::new);
-  }
-
-  private static byte[] encodeEpochPage(long[] epochs) {
-    return ServingIndexRecordCodec.encodeEpochPage(epochs);
   }
 
   private static long[] decodeEpochPage(byte[] encoded) {
@@ -1389,13 +1345,6 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
 
   private static void requireStrictEpochs(List<Long> epochs, long previous) {
     ServingIndexRecordCodec.requireStrictEpochs(epochs, previous);
-  }
-
-  private static int pageCount(long count) {
-    if (count <= 0 || (count - 1) / EPOCHS_PER_PAGE >= Integer.MAX_VALUE) {
-      throw new ArchivePersistenceException("Invalid serving page count");
-    }
-    return (int) ((count - 1) / EPOCHS_PER_PAGE + 1);
   }
 
   private static long[] toArray(List<Long> epochs) {
@@ -2010,8 +1959,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     }
 
     private static KeyMeta paged(long count, long firstEpoch, long lastEpoch) {
-      return new KeyMeta(pageCount(count) >= ServingIndexRecordCodec.DIRECTORY_MIN_PAGES
-          ? PAGED_DIRECTORY : PAGED, count, firstEpoch, lastEpoch, null);
+      return new KeyMeta(PAGED_DIRECTORY, count, firstEpoch, lastEpoch, null);
     }
   }
 
