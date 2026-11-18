@@ -14,6 +14,11 @@ public final class ServingIndexKeyCodec {
   public static final byte KEY_META_PREFIX = 3;
   public static final byte KEY_PAGE_PREFIX = 4;
   public static final byte STORE_COVERAGE_PREFIX = 5;
+  public static final byte KEY_PAGE_DIRECTORY_PREFIX = 6;
+
+  public static byte[] keyPageDirectoryKey(String dbName, byte[] rawKey) {
+    return exactKey(KEY_PAGE_DIRECTORY_PREFIX, dbName, rawKey, null);
+  }
 
   public static byte[] keyMetaKey(String dbName, byte[] rawKey) {
     return exactKey(KEY_META_PREFIX, dbName, rawKey, null);

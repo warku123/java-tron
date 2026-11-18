@@ -19,12 +19,14 @@ import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec.Coverage
 import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec.DescriptorView;
 import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec.KeyMetadataView;
 
-/** Golden bytes captured from the pre-extraction compiled implementation, not regenerated here. */
+/** Original golden fixtures: unchanged records match; replaced fixed-width pages are rejected. */
 public class ServingIndexFormatTest {
   private static final byte[] RAW = new byte[] {1, 0, (byte) 255, 0, 2};
 
   @Test
   public void preservesLegacyAndExactDescriptorGoldenBytesAndDecoding() throws Exception {
+    assertEquals(4, ServingIndexRecordCodec.VERSION);
+    assertEquals(5, ServingIndexRecordCodec.EXACT_VERSION);
     Map<String, byte[]> golden = golden();
     for (short version : new short[] {3, 4, 5}) {
       byte[] encoded = ServingIndexRecordCodec.encodeDescriptor(new Descriptor(version));
@@ -59,7 +61,7 @@ public class ServingIndexFormatTest {
   }
 
   @Test
-  public void preservesCoverageInlinePagedAndEpochPageGoldenBytes() throws Exception {
+  public void preservesCoverageInlineAndPagedMetadataGoldenBytes() throws Exception {
     Map<String, byte[]> golden = golden();
     byte[] coverage = ServingIndexRecordCodec.encodeCoverage(new Coverage());
     assertArrayEquals(golden.get("coverage"), coverage);
@@ -91,10 +93,14 @@ public class ServingIndexFormatTest {
     }
     assertArrayEquals(
         golden.get("paged-513"), ServingIndexRecordCodec.encodeKeyMeta(new Metadata(513, true)));
+  }
+
+  @Test
+  public void rejectsReplacedFixedWidthPageGoldenBytes() throws Exception {
+    Map<String, byte[]> golden = golden();
     for (int count : new int[] {1, 4, 512}) {
-      byte[] encoded = ServingIndexRecordCodec.encodeEpochPage(epochs(count));
-      assertArrayEquals(golden.get("page-" + count), encoded);
-      assertArrayEquals(epochs(count), ServingIndexRecordCodec.decodeEpochPage(encoded));
+      assertThrows(ArchivePersistenceException.class,
+          () -> ServingIndexRecordCodec.decodeEpochPage(golden.get("page-" + count)));
     }
   }
 

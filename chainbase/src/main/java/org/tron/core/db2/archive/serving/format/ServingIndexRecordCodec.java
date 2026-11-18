@@ -12,6 +12,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalLong;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 
@@ -27,6 +29,11 @@ public final class ServingIndexRecordCodec {
   public static final int EPOCHS_PER_PAGE = 512;
   public static final byte INLINE = 1;
   public static final byte PAGED = 2;
+  public static final byte PAGED_DIRECTORY = 3;
+  public static final int RESTART_INTERVAL = 256;
+  public static final int DIRECTORY_MIN_PAGES = 3;
+  private static final byte COMPRESSED_PAGE = 1;
+  private static final byte DIRECTORY_VERSION = 1;
 
   public static byte[] encodeKeyMeta(KeyMetadataView meta) {
     try {
@@ -58,7 +65,8 @@ public final class ServingIndexRecordCodec {
       long count = input.readLong();
       long first = input.readLong();
       long last = input.readLong();
-      if (count <= 0 || first < 0 || last < first || mode != INLINE && mode != PAGED) {
+      if (count <= 0 || first < 0 || last < first
+          || mode != INLINE && mode != PAGED && mode != PAGED_DIRECTORY) {
         throw new ArchivePersistenceException("Invalid exact serving key metadata");
       }
       long[] inline = null;
@@ -72,6 +80,14 @@ public final class ServingIndexRecordCodec {
           inline[i] = input.readLong();
         }
         requireStrictEpochs(asList(inline), Long.MIN_VALUE);
+        if (inline[0] != first || inline[size - 1] != last) {
+          throw new ArchivePersistenceException("Inline serving metadata endpoints differ");
+        }
+      } else if (count <= INLINE_EPOCH_LIMIT
+          || count > (long) Integer.MAX_VALUE * EPOCHS_PER_PAGE
+          || mode == PAGED_DIRECTORY
+              && (count - 1) / EPOCHS_PER_PAGE + 1 < DIRECTORY_MIN_PAGES) {
+        throw new ArchivePersistenceException("Invalid paged serving metadata");
       }
       if (input.available() != 0) {
         throw new ArchivePersistenceException("Exact serving metadata payload mismatch");
@@ -82,31 +98,323 @@ public final class ServingIndexRecordCodec {
     }
   }
 
+  /**
+   * Delta-varint page, Geth-aligned layout: fixed header first, then the encoded heights,
+   * then the restart offset table at the tail. The segment count is derived from the header
+   * ({@code (count - 1) / restartInterval + 1}) instead of being stored separately.
+   */
   public static byte[] encodeEpochPage(long[] epochs) {
-    ByteBuffer payload =
-        ByteBuffer.allocate(Integer.BYTES + epochs.length * Long.BYTES).putInt(epochs.length);
-    for (long epoch : epochs) {
-      payload.putLong(epoch);
+    return encodeEpochPage(epochs, RESTART_INTERVAL);
+  }
+
+  public static byte[] encodeEpochPage(long[] epochs, int restartInterval) {
+    if (epochs.length == 0 || epochs.length > EPOCHS_PER_PAGE
+        || restartInterval <= 0 || restartInterval > EPOCHS_PER_PAGE) {
+      throw new ArchivePersistenceException("Invalid compressed serving page dimensions");
     }
-    return withChecksum(payload.array());
+    requireStrictEpochs(asList(epochs), Long.MIN_VALUE);
+    int segmentCount = (epochs.length - 1) / restartInterval + 1;
+    ByteArrayOutputStream heightBytes = new ByteArrayOutputStream();
+    ByteBuffer restartOffsets = ByteBuffer.allocate(segmentCount * Short.BYTES);
+    for (int start = 0; start < epochs.length; start += restartInterval) {
+      restartOffsets.putShort((short) heightBytes.size());
+      writeUvarint(heightBytes, epochs[start]);
+      int end = StrictMathWrapper.min(start + restartInterval, epochs.length);
+      for (int index = start + 1; index < end; index++) {
+        writeUvarint(heightBytes, epochs[index] - epochs[index - 1]);
+      }
+    }
+    byte[] encodedHeights = heightBytes.toByteArray();
+    return withChecksum(ByteBuffer
+        .allocate(7 + encodedHeights.length + restartOffsets.capacity())
+        .put(COMPRESSED_PAGE).putInt(epochs.length).putShort((short) restartInterval)
+        .put(encodedHeights).put(restartOffsets.array()).array());
   }
 
   public static long[] decodeEpochPage(byte[] encoded) {
-    byte[] payload = checkedPayload(encoded, "exact serving epoch page");
-    ByteBuffer input = ByteBuffer.wrap(payload);
-    if (input.remaining() < Integer.BYTES) {
-      throw new ArchivePersistenceException("Exact serving epoch page is truncated");
-    }
-    int count = input.getInt();
-    if (count <= 0 || count > EPOCHS_PER_PAGE || input.remaining() != count * Long.BYTES) {
-      throw new ArchivePersistenceException("Invalid exact serving epoch page");
-    }
-    long[] epochs = new long[count];
-    for (int i = 0; i < count; i++) {
-      epochs[i] = input.getLong();
+    PageLayout page = parsePageLayout(encoded);
+    int[] offsets = restartOffsets(page);
+    long[] epochs = new long[page.count];
+    for (int segment = 0; segment < page.segmentCount; segment++) {
+      long[] values = decodeSegment(page, offsets, segment);
+      System.arraycopy(values, 0, epochs, segment * page.restartInterval, values.length);
     }
     requireStrictEpochs(asList(epochs), Long.MIN_VALUE);
     return epochs;
+  }
+
+  /** Page header entry count without decoding, the counterpart of Geth's desc.entries. */
+  public static int pageEpochCount(byte[] encoded) {
+    return parsePageLayout(encoded).count;
+  }
+
+  /** First height: the restart-zero anchor, decodable in place at data offset zero. */
+  public static long firstEpochOf(byte[] encoded) {
+    PageLayout page = parsePageLayout(encoded);
+    return readUvarint(ByteBuffer.wrap(page.payload, page.dataOffset,
+        page.payload.length - page.dataOffset));
+  }
+
+  /** Last height: decodes only the final restart segment, the counterpart of sectionLast. */
+  public static long lastEpochOf(byte[] encoded) {
+    PageLayout page = parsePageLayout(encoded);
+    int[] offsets = restartOffsets(page);
+    long[] values = decodeSegment(page, offsets, page.segmentCount - 1);
+    return values[values.length - 1];
+  }
+
+  /**
+   * Geth seekGT alignment: binary-searches the restart anchors by decoding only each anchor's
+   * absolute height, then scans a single segment. Returns the first height greater than
+   * {@code target}, or empty when the whole page ends at or below it.
+   */
+  public static OptionalLong firstEpochGreaterThan(byte[] encoded, long target) {
+    PageLayout page = parsePageLayout(encoded);
+    int[] offsets = restartOffsets(page);
+    int low = 0;
+    int high = page.segmentCount;
+    while (low < high) {
+      int middle = (low + high) >>> 1;
+      if (anchorEpoch(page, offsets, middle) <= target) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    int candidate = low == page.segmentCount
+        ? page.segmentCount - 1 : StrictMathWrapper.max(low - 1, 0);
+    long[] values = decodeSegment(page, offsets, candidate);
+    for (long value : values) {
+      if (value > target) {
+        return OptionalLong.of(value);
+      }
+    }
+    if (candidate + 1 < page.segmentCount) {
+      return OptionalLong.of(anchorEpoch(page, offsets, candidate + 1));
+    }
+    return OptionalLong.empty();
+  }
+
+  /**
+   * Geth-aligned tail append: keeps the encoded prefix untouched and appends only the new
+   * varint bytes, adding a restart anchor whenever a segment fills. Page, directory and
+   * KeyMeta commit atomically, so {@code oldCount} and {@code lastEpoch} (Geth's in-memory
+   * desc fields) are trusted for the delta base instead of decoding the page.
+   */
+  public static byte[] appendEpochPage(byte[] encoded, List<Long> appended,
+      int oldCount, long lastEpoch) {
+    if (appended.isEmpty() || appended.get(0) <= lastEpoch) {
+      throw new ArchivePersistenceException("Serving append is out of order");
+    }
+    if (oldCount <= 0 || oldCount >= EPOCHS_PER_PAGE
+        || oldCount + appended.size() > EPOCHS_PER_PAGE) {
+      throw new ArchivePersistenceException("Invalid compressed serving page dimensions");
+    }
+    PageLayout page = parsePageLayout(encoded);
+    if (page.count != oldCount) {
+      throw new ArchivePersistenceException("Serving tail page differs from metadata");
+    }
+    restartOffsets(page);
+    ByteArrayOutputStream heightBytes = new ByteArrayOutputStream();
+    heightBytes.write(page.payload, page.dataOffset, page.dataLength);
+    ByteBuffer restartOffsets = ByteBuffer
+        .allocate((page.segmentCount + appended.size() + 1) * Short.BYTES);
+    for (int index = 0; index < page.segmentCount; index++) {
+      restartOffsets.putShort(ByteBuffer.wrap(page.payload,
+          page.offsetsOffset + index * Short.BYTES, Short.BYTES).getShort());
+    }
+    long previous = lastEpoch;
+    int newCount = page.count;
+    for (long epoch : appended) {
+      if (epoch <= previous) {
+        throw new ArchivePersistenceException("Serving append is out of order");
+      }
+      if (newCount % page.restartInterval == 0) {
+        restartOffsets.putShort((short) heightBytes.size());
+        writeUvarint(heightBytes, epoch);
+      } else {
+        writeUvarint(heightBytes, epoch - previous);
+      }
+      previous = epoch;
+      newCount++;
+    }
+    restartOffsets.flip();
+    byte[] encodedHeights = heightBytes.toByteArray();
+    return withChecksum(ByteBuffer
+        .allocate(7 + encodedHeights.length + restartOffsets.remaining())
+        .put(COMPRESSED_PAGE).putInt(newCount).putShort((short) page.restartInterval)
+        .put(encodedHeights).put(restartOffsets).array());
+  }
+
+  /** Structural page view shared by full decode, append, seek and partial reads. */
+  private static final class PageLayout {
+    final byte[] payload;
+    final int count;
+    final int restartInterval;
+    final int segmentCount;
+    final int dataOffset;
+    final int dataLength;
+    final int offsetsOffset;
+
+    PageLayout(byte[] payload, int count, int restartInterval, int segmentCount,
+        int dataOffset, int dataLength, int offsetsOffset) {
+      this.payload = payload;
+      this.count = count;
+      this.restartInterval = restartInterval;
+      this.segmentCount = segmentCount;
+      this.dataOffset = dataOffset;
+      this.dataLength = dataLength;
+      this.offsetsOffset = offsetsOffset;
+    }
+  }
+
+  private static PageLayout parsePageLayout(byte[] encoded) {
+    byte[] payload = checkedPayload(encoded, "exact serving epoch page");
+    if (payload.length < 7 + Short.BYTES || payload[0] != COMPRESSED_PAGE) {
+      throw new ArchivePersistenceException("Invalid or truncated compressed serving page");
+    }
+    int count = ByteBuffer.wrap(payload, 1, Integer.BYTES).getInt();
+    int restartInterval = Short.toUnsignedInt(ByteBuffer.wrap(payload, 5, Short.BYTES).getShort());
+    if (count <= 0 || count > EPOCHS_PER_PAGE || restartInterval == 0
+        || restartInterval > EPOCHS_PER_PAGE) {
+      throw new ArchivePersistenceException("Invalid compressed serving page header");
+    }
+    int segmentCount = (count - 1) / restartInterval + 1;
+    int offsetsOffset = payload.length - segmentCount * Short.BYTES;
+    if (offsetsOffset < 7 + count) {
+      throw new ArchivePersistenceException("Invalid compressed serving page header");
+    }
+    return new PageLayout(payload, count, restartInterval, segmentCount,
+        7, offsetsOffset - 7, offsetsOffset);
+  }
+
+  private static int[] restartOffsets(PageLayout page) {
+    int[] offsets = new int[page.segmentCount + 1];
+    for (int index = 0; index < page.segmentCount; index++) {
+      offsets[index] = Short.toUnsignedInt(ByteBuffer.wrap(page.payload,
+          page.offsetsOffset + index * Short.BYTES, Short.BYTES).getShort());
+    }
+    offsets[page.segmentCount] = page.dataLength;
+    if (offsets[0] != 0) {
+      throw new ArchivePersistenceException("Invalid serving restart origin");
+    }
+    for (int index = 0; index < page.segmentCount; index++) {
+      if (offsets[index] >= offsets[index + 1]) {
+        throw new ArchivePersistenceException("Invalid serving restart offsets");
+      }
+    }
+    return offsets;
+  }
+
+  private static long anchorEpoch(PageLayout page, int[] offsets, int segment) {
+    return readUvarint(ByteBuffer.wrap(page.payload, page.dataOffset + offsets[segment],
+        page.payload.length - page.dataOffset - offsets[segment]));
+  }
+
+  private static long[] decodeSegment(PageLayout page, int[] offsets, int segment) {
+    int start = segment * page.restartInterval;
+    int end = StrictMathWrapper.min(start + page.restartInterval, page.count);
+    ByteBuffer segmentBytes = ByteBuffer.wrap(page.payload, page.dataOffset + offsets[segment],
+        offsets[segment + 1] - offsets[segment]).slice();
+    long[] epochs = new long[end - start];
+    epochs[0] = readUvarint(segmentBytes);
+    for (int index = 1; index < epochs.length; index++) {
+      epochs[index] = addDelta(epochs[index - 1], readUvarint(segmentBytes));
+    }
+    if (segmentBytes.hasRemaining()) {
+      throw new ArchivePersistenceException("Serving restart has trailing bytes");
+    }
+    return epochs;
+  }
+
+  /**
+   * Geth-aligned fixed-size page directory: one 14-byte descriptor per page
+   * ({@code pageMax:8 + pageEntries:2 + pageId:4}), replacing the variable-length delta
+   * encoding so a descriptor's max height is readable without any varint decoding.
+   */
+  public static byte[] encodePageDirectory(long[] pageMaxHeights, long totalEntries) {
+    if (pageMaxHeights.length < DIRECTORY_MIN_PAGES) {
+      throw new ArchivePersistenceException("Serving directory has too few pages");
+    }
+    requireStrictEpochs(asList(pageMaxHeights), Long.MIN_VALUE);
+    ByteBuffer descriptors = ByteBuffer.allocate(pageMaxHeights.length * 14);
+    long remaining = totalEntries;
+    for (int index = 0; index < pageMaxHeights.length; index++) {
+      int entries = (int) StrictMathWrapper.min(EPOCHS_PER_PAGE, remaining);
+      if (entries <= 0) {
+        throw new ArchivePersistenceException("Serving directory entries mismatch");
+      }
+      remaining -= entries;
+      descriptors.putLong(pageMaxHeights[index]).putShort((short) entries).putInt(index);
+    }
+    if (remaining != 0) {
+      throw new ArchivePersistenceException("Serving directory entries mismatch");
+    }
+    return withChecksum(ByteBuffer.allocate(5 + descriptors.capacity())
+        .put(DIRECTORY_VERSION).putInt(pageMaxHeights.length).put(descriptors.array()).array());
+  }
+
+  /** Validate dimensions against KeyMeta before allocating a directory array. */
+  public static long[] decodePageDirectory(byte[] encoded, int expectedPages, long lastEpoch) {
+    byte[] payload = checkedPayload(encoded, "serving page directory");
+    if (payload.length != 5 + expectedPages * 14 || payload[0] != DIRECTORY_VERSION
+        || ByteBuffer.wrap(payload, 1, Integer.BYTES).getInt() != expectedPages
+        || expectedPages < DIRECTORY_MIN_PAGES) {
+      throw new ArchivePersistenceException("Invalid serving page directory dimensions");
+    }
+    long[] pageMaxHeights = new long[expectedPages];
+    for (int index = 0; index < expectedPages; index++) {
+      int base = 5 + index * 14;
+      long max = ByteBuffer.wrap(payload, base, Long.BYTES).getLong();
+      int entries = Short.toUnsignedInt(
+          ByteBuffer.wrap(payload, base + 8, Short.BYTES).getShort());
+      int pageId = ByteBuffer.wrap(payload, base + 10, Integer.BYTES).getInt();
+      boolean last = index == expectedPages - 1;
+      if (pageId != index || entries <= 0 || entries > EPOCHS_PER_PAGE
+          || !last && entries != EPOCHS_PER_PAGE
+          || index > 0 && max <= pageMaxHeights[index - 1]) {
+        throw new ArchivePersistenceException("Invalid serving page directory descriptor");
+      }
+      pageMaxHeights[index] = max;
+    }
+    if (pageMaxHeights[expectedPages - 1] != lastEpoch) {
+      throw new ArchivePersistenceException("Serving page directory endpoints differ");
+    }
+    return pageMaxHeights;
+  }
+
+  private static void writeUvarint(ByteArrayOutputStream output, long value) {
+    while ((value & ~0x7fL) != 0) {
+      output.write((int) (value & 0x7f) | 0x80);
+      value >>>= 7;
+    }
+    output.write((int) value);
+  }
+
+  /** Heights are nonnegative signed longs, so their canonical varints use at most nine bytes. */
+  private static long readUvarint(ByteBuffer input) {
+    long value = 0;
+    for (int shift = 0; shift <= 56; shift += 7) {
+      if (!input.hasRemaining()) {
+        throw new ArchivePersistenceException("Serving varint is truncated");
+      }
+      int next = Byte.toUnsignedInt(input.get());
+      value |= (long) (next & 0x7f) << shift;
+      if ((next & 0x80) == 0) {
+        if (shift != 0 && next == 0) {
+          throw new ArchivePersistenceException("Serving varint is not canonical");
+        }
+        return value;
+      }
+    }
+    throw new ArchivePersistenceException("Serving varint overflows");
+  }
+
+  private static long addDelta(long previous, long delta) {
+    if (delta <= 0 || previous > Long.MAX_VALUE - delta) {
+      throw new ArchivePersistenceException("Serving delta is zero or overflows");
+    }
+    return previous + delta;
   }
 
   public static byte[] encodeCoverage(CoverageView coverage) {

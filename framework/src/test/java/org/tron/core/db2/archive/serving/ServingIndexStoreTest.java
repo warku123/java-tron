@@ -225,7 +225,8 @@ public class ServingIndexStoreTest {
             }
           }
         }
-        assertTrue(written > 0 && written < keys);
+        // Compression can put all key groups before a separate publication-only final chunk.
+        assertTrue(written > 0 && written <= keys);
         // Queries bounded by I never see the residue.
         try (ArchiveIndexStorage.Reader snapshot = reopened.snapshot();
             PersistentServingKeyIndexGeneration view =

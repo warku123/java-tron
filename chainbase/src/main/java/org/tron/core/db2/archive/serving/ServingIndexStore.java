@@ -34,10 +34,12 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  * The single long-lived write handle of the V5 serving index (ch04 §3.2, WP-S2).
  *
  * <p>Layout of {@code single-v1/keys}: KeyMeta ({@code 0x03}), KeyEpochPage ({@code 0x04}),
- * StoreCoverage ({@code 0x05}), the exact-v5 progress descriptor ({@code 7f 'S' 'I' 01}) and the
+ * StoreCoverage ({@code 0x05}), PageDirectory ({@code 0x06}), the exact progress descriptor
+ * ({@code 7f 'S' 'I' 01}) and the
  * state record ({@code 7f 'S' 'S' 01}). Every normal batch writes its index data, the 27
  * coverage rows and the descriptor in one {@code sync} batch (S-INV-3). A solo batch is split by
- * key (S-INV-13): all chunks but the last carry only KeyMeta and pages; the last chunk carries
+ * key (S-INV-13): all chunks but the last carry only KeyMeta, pages and directories;
+ * the last chunk carries
  * the coverage and the descriptor. R-IDEM makes a replay of an interrupted solo idempotent.
  *
  * <p>Only the serving build thread writes. Query leases take native snapshots on this handle
@@ -350,7 +352,7 @@ final class ServingIndexStore implements Closeable {
 
   /**
    * Commits a solo batch of exactly one block split into key-atomic chunks (ch04 §3.5.4). Every
-   * chunk but the last carries only KeyMeta and pages; the last carries coverage and progress.
+   * chunk but the last carries KeyMeta, pages and directories; the last carries coverage/progress.
    *
    * @return the number of physical write batches
    */
@@ -405,7 +407,7 @@ final class ServingIndexStore implements Closeable {
     }
   }
 
-  /** Key-atomic mutation groups (S-INV-13): each group is one key's pages then its KeyMeta. */
+  /** Key-atomic groups (S-INV-13): one key's pages, optional directory, then KeyMeta. */
   private List<List<Mutation>> keyGroups(ServingIndexIncrementalPlan plan) throws IOException {
     Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
