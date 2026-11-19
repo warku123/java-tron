@@ -43,34 +43,26 @@ public final class ServingIndexRecordCodec {
   public static final int RESTART_INTERVAL = 256;
   private static final byte COMPRESSED_PAGE = 1;
   private static final byte DIRECTORY_VERSION = 1;
-  private static final int KEY_META_BYTES = 1 + 3 * Long.BYTES + Integer.BYTES;
   private static final int PAGE_HEADER_BYTES = 1 + Integer.BYTES + Short.BYTES;
   private static final int DIRECTORY_HEADER_BYTES = 1 + Integer.BYTES;
   private static final int PAGE_DESCRIPTOR_BYTES = Long.BYTES + Short.BYTES + Integer.BYTES;
 
-  /** Encoded KeyMeta length; zero inline entries denotes paged metadata. */
-  public static int keyMetaValueBytes(int inlineEntries) {
-    return KEY_META_BYTES + (inlineEntries == 0 ? 0 : Integer.BYTES + inlineEntries * Long.BYTES);
-  }
-
-  public static long directoryValueBytes(long pageCount) {
+  private static long directoryValueBytes(long pageCount) {
     return DIRECTORY_HEADER_BYTES + pageCount * PAGE_DESCRIPTOR_BYTES + Integer.BYTES;
   }
 
-  public static int pageValueBytes(int dataBytes, int segments) {
+  private static int pageValueBytes(int dataBytes, int segments) {
     return PAGE_HEADER_BYTES + dataBytes + segments * Short.BYTES + Integer.BYTES;
   }
 
   public static boolean isPageFull(int dataBytes) {
+    // Match Geth's no-extension rollover estimate. Long.BYTES is an 8-byte allowance,
+    // not the Uvarint maximum: a nonnegative long can encode to 9 bytes.
     return dataBytes + Long.BYTES > PAGE_DATA_BUDGET;
   }
 
-  public static boolean isRestart(int entries, int restartInterval) {
+  private static boolean isRestart(int entries, int restartInterval) {
     return entries % restartInterval == 0;
-  }
-
-  public static int heightValueBytes(long value) {
-    return (70 - Long.numberOfLeadingZeros(value | 1L)) / 7;
   }
 
   public static byte[] encodeKeyMeta(KeyMetadataView meta) {
@@ -174,47 +166,6 @@ public final class ServingIndexRecordCodec {
   /** Page header entry count without decoding, the counterpart of Geth's desc.entries. */
   public static int pageEpochCount(byte[] encoded) {
     return parsePageLayout(encoded).count;
-  }
-
-  /**
-   * Structural page dimensions without decoding any height, for exact write-budget
-   * preflight; mirrors what {@link PageWriter} reopens from the same bytes.
-   */
-  public static PageShape pageShape(byte[] encoded, PageDescriptor descriptor) {
-    PageLayout page = parseTailLayout(encoded, descriptor);
-    restartOffsets(page);
-    return new PageShape(page.count, page.restartInterval, page.segmentCount, page.dataLength);
-  }
-
-  /** Read-only dimensions of one encoded page. */
-  public static final class PageShape {
-    private final int entries;
-    private final int restartInterval;
-    private final int segmentCount;
-    private final int dataBytes;
-
-    private PageShape(int entries, int restartInterval, int segmentCount, int dataBytes) {
-      this.entries = entries;
-      this.restartInterval = restartInterval;
-      this.segmentCount = segmentCount;
-      this.dataBytes = dataBytes;
-    }
-
-    public int entries() {
-      return entries;
-    }
-
-    public int restartInterval() {
-      return restartInterval;
-    }
-
-    public int segmentCount() {
-      return segmentCount;
-    }
-
-    public int dataBytes() {
-      return dataBytes;
-    }
   }
 
   /** First height: the restart-zero anchor, decodable in place at data offset zero. */

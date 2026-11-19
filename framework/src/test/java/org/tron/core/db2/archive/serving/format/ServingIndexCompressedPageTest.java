@@ -84,7 +84,7 @@ public class ServingIndexCompressedPageTest {
   }
 
   @Test
-  public void defaultIntervalPagesStayWithinTheBudgetAndRestartFresh() {
+  public void defaultIntervalPagesRollOnTheByteEstimateAndRestartFresh() {
     // Consecutive heights from 101: restart anchors cost two bytes from segment one on.
     // The exact split is byte-driven (4074 + 926), not any fixed entry count.
     List<byte[]> pages = paginate(consecutive(101, 5000),
@@ -96,6 +96,24 @@ public class ServingIndexCompressedPageTest {
     assertTrue(pages.get(0).length > ServingIndexRecordCodec.PAGE_DATA_BUDGET);
     // The second page restarts with an absolute height, not a delta across the boundary.
     assertEquals(101 + 4074, ServingIndexRecordCodec.firstEpochOf(pages.get(1)));
+  }
+
+  @Test
+  public void allowsANineByteVarintAtTheRolloverBoundary() {
+    long[] epochs = consecutive(0, 4074);
+    // From zero, 4073 consecutive heights plus 15 extra restart bytes take 4088 B.
+    epochs[4073] = epochs[4072] + (1L << 56);
+    PageWriter writer = new PageWriter();
+    for (int i = 0; i < epochs.length - 1; i++) {
+      writer.append(epochs[i]);
+    }
+    assertFalse(writer.isFull()); // 4088 + 8 == 4096: admit one more height.
+    writer.append(epochs[4073]);
+    assertTrue(writer.isFull());
+    byte[] page = writer.finish();
+    int segments = (epochs.length - 1) / ServingIndexRecordCodec.RESTART_INTERVAL + 1;
+    assertEquals(4097, page.length - 7 - segments * Short.BYTES - Integer.BYTES);
+    assertArrayEquals(epochs, ServingIndexRecordCodec.decodeEpochPage(page));
   }
 
   @Test

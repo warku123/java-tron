@@ -2,9 +2,7 @@ package org.tron.core.db2.archive.serving;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.blocks;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.hash;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.key;
@@ -12,6 +10,7 @@ import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.plan;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.OptionalLong;
@@ -19,10 +18,10 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchivePersistenceException;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.ExactKey;
 import org.tron.core.db2.archive.serving.format.ServingIndexKeyCodec;
 import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec;
 import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec.PageDescriptor;
-import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
@@ -32,10 +31,6 @@ public class ServingIndexDirectoryTest {
   // entries: restart anchors cost two bytes from the second segment on, and appends
   // stop once the encoded data area passes the Geth-style estimate.
   private static final int FIRST_PAGE_ENTRIES = 4074;
-  private static final ServingIndexStore.WriteBudget LARGE =
-      new ServingIndexStore.WriteBudget(500_000, 64L * 1024 * 1024);
-  private static final ServingIndexStore.WriteBudget TINY =
-      new ServingIndexStore.WriteBudget(64, 64 * 1024);
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -45,7 +40,7 @@ public class ServingIndexDirectoryTest {
     Path directory = temporaryFolder.newFolder().toPath().resolve("single-v1");
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey("code", key(0));
     try (ServingIndexStore store = open(directory)) {
-      assertTrue(store.commit(plan(store, blocks(B0, 5, 1)), LARGE, false));
+      store.commit(plan(store, blocks(B0, 5, 1)), false);
       try (ArchiveIndexStorage.Reader snapshot = store.snapshot();
           PersistentServingKeyIndexGeneration current = view(directory, snapshot)) {
         assertEquals(3, snapshot.get(ServingIndexKeyCodec.keyMetaKey("code", key(0)))[0]);
@@ -80,7 +75,7 @@ public class ServingIndexDirectoryTest {
     Path directory = temporaryFolder.newFolder().toPath().resolve("single-v1");
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey("code", key(0));
     try (ServingIndexStore store = open(directory)) {
-      assertTrue(store.commit(plan(store, blocks(B0, 5000, 1)), LARGE, false));
+      store.commit(plan(store, blocks(B0, 5000, 1)), false);
       try (ArchiveIndexStorage.Reader snapshot = store.snapshot();
            PersistentServingKeyIndexGeneration current = view(directory, snapshot)) {
         List<PageDescriptor> pages = ServingIndexRecordCodec.decodePageDirectory(
@@ -106,15 +101,14 @@ public class ServingIndexDirectoryTest {
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey("code", key(0));
     byte[] fullPage;
     try (ServingIndexStore store = open(directory)) {
-      assertTrue(store.commit(plan(store, blocks(B0, FIRST_PAGE_ENTRIES, 1)), LARGE, false));
+      store.commit(plan(store, blocks(B0, FIRST_PAGE_ENTRIES, 1)), false);
       try (ArchiveIndexStorage.Reader oldSnapshot = store.snapshot();
            PersistentServingKeyIndexGeneration old = view(directory, oldSnapshot)) {
         fullPage = oldSnapshot.get(ServingIndexKeyCodec.keyPageKey("code", key(0), 0));
         List<PageDescriptor> oldPages = ServingIndexRecordCodec.decodePageDirectory(
             oldSnapshot.get(directoryKey), FIRST_PAGE_ENTRIES, B0 + FIRST_PAGE_ENTRIES - 1);
         assertEquals(1, oldPages.size());
-        assertTrue(store.commit(
-            plan(store, blocks(B0 + FIRST_PAGE_ENTRIES, 1, 1)), LARGE, false));
+        store.commit(plan(store, blocks(B0 + FIRST_PAGE_ENTRIES, 1, 1)), false);
         // The pre-append snapshot still answers from its own single-page directory.
         assertEquals(OptionalLong.of(B0 + FIRST_PAGE_ENTRIES - 1),
             old.firstChangeAfter("code", key(0), B0 + FIRST_PAGE_ENTRIES - 2,
@@ -144,17 +138,18 @@ public class ServingIndexDirectoryTest {
     Path whole = temporaryFolder.newFolder().toPath().resolve("single-v1");
     Path split = temporaryFolder.newFolder().toPath().resolve("single-v1");
     try (ServingIndexStore store = open(whole)) {
-      assertTrue(store.commit(plan(store, blocks(B0, 5000, 1)), LARGE, false));
+      store.commit(plan(store, blocks(B0, 5000, 1)), false);
     }
     try (ServingIndexStore store = open(split)) {
       for (int start = 0; start < 5000; start += 50) {
-        assertTrue(store.commit(
-            plan(store, blocks(B0 + start, 50, 1)), LARGE, false));
+        store.commit(plan(store, blocks(B0 + start, 50, 1)), false);
       }
       assertEquals(B0 + 4999, store.indexedThrough());
     }
-    try (ArchiveIndexStorage.Reader wholeSnapshot = open(whole).snapshot();
-         ArchiveIndexStorage.Reader splitSnapshot = open(split).snapshot()) {
+    try (ServingIndexStore wholeStore = open(whole);
+         ServingIndexStore splitStore = open(split);
+         ArchiveIndexStorage.Reader wholeSnapshot = wholeStore.snapshot();
+         ArchiveIndexStorage.Reader splitSnapshot = splitStore.snapshot()) {
       assertArrayEquals(wholeSnapshot.get(ServingIndexKeyCodec.keyPageKey("code", key(0), 0)),
           splitSnapshot.get(ServingIndexKeyCodec.keyPageKey("code", key(0), 0)));
       assertArrayEquals(wholeSnapshot.get(ServingIndexKeyCodec.keyPageKey("code", key(0), 1)),
@@ -170,67 +165,62 @@ public class ServingIndexDirectoryTest {
   @Test
   public void replayRejectsMissingDirectoryInAlreadyWrittenSoloGroup() throws Exception {
     Path directory = temporaryFolder.newFolder().toPath().resolve("single-v1");
-    byte[] residueDirectory = null;
-    try (ServingIndexStore store = open(directory)) {
-      assertTrue(store.commit(plan(store, blocks(B0, 1024, 80)), LARGE, false));
-      ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));
-      assertThrows(IOException.class, () -> store.commitSolo(next, TINY, false,
-          (index, count) -> {
-            if (index == 1) {
-              throw new IOException("interrupt before progress publication");
-            }
-          }));
-      try (ArchiveIndexStorage.Reader snapshot = store.snapshot()) {
-        for (int index = 0; index < 80; index++) {
-          byte[] candidate = ServingIndexKeyCodec.keyPageDirectoryKey("code", key(index));
-          if (snapshot.get(candidate) != null) {
-            residueDirectory = candidate;
-            break;
-          }
-        }
-      }
-    }
-    assertNotNull(residueDirectory);
+    long solo = seedInterruptedSolo(directory);
     try (ArchiveIndexStorage.Writer writer = ArchiveIndexStorage.openWriter(
         directory.resolve("keys"), Engine.ROCKSDB)) {
-      writer.write(Collections.singletonList(ArchiveIndexStorage.delete(residueDirectory)), true);
+      byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey("code", key(0));
+      writer.write(Collections.singletonList(ArchiveIndexStorage.delete(directoryKey)), true);
     }
     try (ServingIndexStore store = open(directory)) {
-      ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));
       assertThrows(ArchivePersistenceException.class,
-          () -> store.commitSolo(next, TINY, false, ServingIndexStore.ChunkHook.NONE));
-      assertEquals(B0 + 1023, store.indexedThrough());
+          () -> store.commit(plan(store, blocks(solo, 1, 2)), false));
+      assertEquals(solo - 1, store.indexedThrough());
     }
   }
 
   @Test
-  public void soloReplayKeepsDirectoryPagesAndMetadataAtomic() throws Exception {
+  public void legacySoloReplayPreservesRolledPageAndAppendsRemainingEpochs() throws Exception {
     Path directory = temporaryFolder.newFolder().toPath().resolve("single-v1");
+    long solo = seedInterruptedSolo(directory);
     try (ServingIndexStore store = open(directory)) {
-      assertTrue(store.commit(plan(store, blocks(B0, 1024, 80)), LARGE, false));
-      ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));
-      ServingIndexStore.Preparation preparation = store.preparation();
-      assertThrows(IOException.class, () -> store.commitSolo(next, TINY, false,
-          (index, count) -> {
-            if (index == 1) {
-              throw new IOException("interrupt after a directory-bearing key group");
-            }
-          }, preparation));
-      assertEquals(B0 + 1023, store.indexedThrough());
-      assertThrows(IllegalStateException.class,
-          () -> store.commitSolo(next, TINY, false, ServingIndexStore.ChunkHook.NONE, preparation));
+      assertEquals(solo - 1, store.indexedThrough());
+      store.commit(plan(store, blocks(solo, 2, 2)), false);
     }
     try (ServingIndexStore store = open(directory)) {
-      ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));
-      store.commitSolo(next, TINY, false, ServingIndexStore.ChunkHook.NONE);
+      assertEquals(solo + 1, store.indexedThrough());
+      assertEquals(FIRST_PAGE_ENTRIES + 4, store.keyChanges());
       try (ArchiveIndexStorage.Reader snapshot = store.snapshot();
            PersistentServingKeyIndexGeneration current = view(directory, snapshot)) {
-        for (int index = 0; index < 80; index++) {
-          assertEquals(OptionalLong.of(B0 + 1024), current.firstChangeAfter("code", key(index),
-              B0 + 1023, B0 + 1024));
+        List<PageDescriptor> pages = ServingIndexRecordCodec.decodePageDirectory(snapshot.get(
+            ServingIndexKeyCodec.keyPageDirectoryKey("code", key(0))),
+            FIRST_PAGE_ENTRIES + 2, solo + 1);
+        assertEquals(2, pages.size());
+        assertEquals(FIRST_PAGE_ENTRIES, pages.get(0).entries());
+        assertEquals(2, pages.get(1).entries());
+        for (int index = 0; index < 2; index++) {
+          assertEquals(OptionalLong.of(solo),
+              current.firstChangeAfter("code", key(index), solo - 1, solo + 1));
+          assertEquals(OptionalLong.of(solo + 1),
+              current.firstChangeAfter("code", key(index), solo, solo + 1));
         }
       }
     }
+  }
+
+  private static long seedInterruptedSolo(Path directory) throws IOException {
+    long solo = B0 + FIRST_PAGE_ENTRIES;
+    try (ServingIndexStore store = open(directory)) {
+      store.commit(plan(store, blocks(B0, FIRST_PAGE_ENTRIES, 1)), false);
+    }
+    try (ArchiveIndexStorage.Writer writer = ArchiveIndexStorage.openWriter(
+        directory.resolve("keys"), Engine.ROCKSDB)) {
+      List<ArchiveIndexStorage.Mutation> mutations = new ArrayList<>();
+      PersistentServingKeyIndexGeneration.appendExactChanges(writer, mutations,
+          new ExactKey("code", key(0)), Collections.singletonList(solo), solo - 1);
+      // Rolled page, directory and KeyMeta were durable, but coverage and progress were not.
+      writer.write(mutations, true);
+    }
+    return solo;
   }
 
   private static ServingIndexStore open(Path directory) throws IOException {

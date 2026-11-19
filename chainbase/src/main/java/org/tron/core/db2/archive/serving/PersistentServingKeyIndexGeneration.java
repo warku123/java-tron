@@ -1167,68 +1167,17 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   static void appendExactChanges(ArchiveIndexStorage.Writer target,
       List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
       List<Long> suppliedEpochs, long durableI) throws IOException {
-    prepareExactChanges(target, key, suppliedEpochs, durableI, new KeyStateCache())
-        .appendTo(batch);
-  }
-
-  /**
-   * Request-scoped reads. Bound the extra directory/tail payload retained by preflight;
-   * records that do not fit are read again only if another pass needs them.
-   */
-  static final class KeyStateCache {
-    private static final long MAX_PAGE_CACHE_BYTES = 8L * 1024 * 1024;
-    private final Map<ExactKey, byte[]> metadata = new LinkedHashMap<>();
-    private final Map<ExactKey, byte[]> directories = new LinkedHashMap<>();
-    private final Map<ExactKey, byte[]> tailPages = new LinkedHashMap<>();
-    private long pageCacheBytes;
-
-    private byte[] retain(Map<ExactKey, byte[]> records, ExactKey key, byte[] value) {
-      if (value != null && value.length <= MAX_PAGE_CACHE_BYTES - pageCacheBytes) {
-        records.put(key, value);
-        pageCacheBytes += value.length;
-      }
-      return value;
-    }
-  }
-
-  private static byte[] cachedDirectory(ArchiveIndexStorage.Writer target, ExactKey key,
-      KeyStateCache cache) throws IOException {
-    byte[] directory = cache.directories.get(key);
-    return directory != null ? directory : cache.retain(cache.directories, key,
-        target.get(ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey)));
-  }
-
-  private static byte[] cachedTailPage(ArchiveIndexStorage.Writer target, ExactKey key,
-      int pageId, KeyStateCache cache) throws IOException {
-    byte[] tail = cache.tailPages.get(key);
-    if (tail != null) {
-      return tail;
-    }
-    long started = System.nanoTime();
-    try {
-      return cache.retain(cache.tailPages, key,
-          target.get(keyPageKey(key.dbName, key.rawKey, pageId)));
-    } finally {
-      ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, started);
-    }
-  }
-
-  /** Reads metadata once per source batch; rejected prefixes never encode pages. */
-  static PreparedExactChanges prepareExactChanges(ArchiveIndexStorage.Writer target,
-      ExactKey key, List<Long> suppliedEpochs, long durableI, KeyStateCache cache)
-      throws IOException {
     List<Long> appended = suppliedEpochs;
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
-    if (!cache.metadata.containsKey(key)) {
-      long started = System.nanoTime();
-      try {
-        cache.metadata.put(key, target.get(metaKey));
-      } finally {
-        ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
-      }
+    byte[] existing;
+    long started = System.nanoTime();
+    try {
+      existing = target.get(metaKey);
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
     }
-    byte[] existing = cache.metadata.get(key);
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
+    List<ServingIndexRecordCodec.PageDescriptor> pages = null;
     if (meta != null && meta.lastEpoch > durableI) {
       if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1 || appended.isEmpty()
           || appended.get(0) != durableI + 1) {
@@ -1236,206 +1185,49 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
             "Serving R-IDEM violated: KeyMeta last epoch is ahead of durable progress");
       }
       if (meta.mode == PAGED_DIRECTORY) {
-        ServingIndexRecordCodec.decodePageDirectory(cachedDirectory(target, key, cache),
-            meta.count, meta.lastEpoch);
+        pages = readDirectory(target, key, meta);
       }
       appended = appended.subList(1, appended.size());
     }
-    if (!appended.isEmpty()) {
-      requireStrictEpochs(appended, meta == null ? Long.MIN_VALUE : meta.lastEpoch);
+    if (appended.isEmpty()) {
+      return;
     }
-    return new PreparedExactChanges(target, key, metaKey, meta, appended, cache);
+    requireStrictEpochs(appended, meta == null ? Long.MIN_VALUE : meta.lastEpoch);
+    long count = (meta == null ? 0 : meta.count) + appended.size();
+    byte[] encodedTail = null;
+    if (meta != null && meta.mode != INLINE) {
+      if (pages == null) {
+        pages = readDirectory(target, key, meta);
+      }
+      int tailId = pages.get(pages.size() - 1).pageId();
+      started = System.nanoTime();
+      try {
+        encodedTail = target.get(keyPageKey(key.dbName, key.rawKey, tailId));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, started);
+      }
+    } else {
+      if (meta != null) {
+        List<Long> combined = asList(meta.inlineEpochs);
+        combined.addAll(appended);
+        appended = combined;
+      }
+      if (count <= INLINE_EPOCH_LIMIT) {
+        batch.add(ArchiveIndexStorage.put(metaKey, encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
+        return;
+      }
+      pages = new ArrayList<>();
+    }
+    writePagedChanges(batch, key, appended, encodedTail, pages);
+    batch.add(ArchiveIndexStorage.put(metaKey, encodeKeyMeta(KeyMeta.paged(count,
+        meta == null ? appended.get(0) : meta.firstEpoch, appended.get(appended.size() - 1)))));
   }
 
-  /**
-   * One key's pending append. {@link #mutationCount()} and {@link #estimatedBytes()} are
-   * produced by a byte-count shadow that mirrors {@link ServingIndexRecordCodec.PageWriter}
-   * exactly (same rolling estimate, restart anchors and value layouts) without encoding
-   * any page, so preflight never underestimates a batch.
-   */
-  static final class PreparedExactChanges {
-    private final ArchiveIndexStorage.Writer target;
-    private final ExactKey key;
-    private final byte[] metaKey;
-    private final KeyMeta meta;
-    private final List<Long> appended;
-    private final KeyStateCache cache;
-
-    // Lazily seeded state; effective holds the epochs the pages will contain.
-    private List<Long> effective;
-    private int keptPages;
-    private int pageKeyLength;
-    private int directoryKeyLength;
-    private int restartInterval = ServingIndexRecordCodec.RESTART_INTERVAL;
-    private boolean seeded;
-
-    // Shadow of the page writer's live page.
-    private int shadowData;
-    private int shadowEntries;
-    private int shadowSegments;
-    private long shadowLast;
-    private int simulated;
-    private int emittedCount;
-    private long emittedBytes;
-
-    private PreparedExactChanges(ArchiveIndexStorage.Writer target, ExactKey key,
-        byte[] metaKey, KeyMeta meta, List<Long> appended, KeyStateCache cache) {
-      this.target = target;
-      this.key = key;
-      this.metaKey = metaKey;
-      this.meta = meta;
-      this.appended = appended;
-      this.cache = cache;
-    }
-
-    /** Used only by the block-wise budget probe; validates each new epoch once. */
-    void appendEpoch(long epoch) {
-      long previous = appended.isEmpty() ? (meta == null ? Long.MIN_VALUE : meta.lastEpoch)
-          : appended.get(appended.size() - 1);
-      if (epoch < 0 || epoch <= previous) {
-        throw new IllegalArgumentException("Serving epochs must increase strictly");
-      }
-      appended.add(epoch);
-      if (effective != null && effective != appended) {
-        effective.add(epoch);
-      }
-    }
-
-    long mutationCount() throws IOException {
-      if (appended.isEmpty()) {
-        return 0;
-      }
-      if (inlineAfterAppend()) {
-        return 1;
-      }
-      simulate();
-      return emittedCount + pendingPages() + 2; // pages + directory + KeyMeta
-    }
-
-    long estimatedBytes() throws IOException {
-      if (appended.isEmpty()) {
-        return 0;
-      }
-      if (inlineAfterAppend()) {
-        int entries = (int) (priorCount() + appended.size());
-        return 32L + metaKey.length + ServingIndexRecordCodec.keyMetaValueBytes(entries);
-      }
-      simulate();
-      long resultPages = (long) keptPages + emittedCount + pendingPages();
-      return 32L + metaKey.length + ServingIndexRecordCodec.keyMetaValueBytes(0)
-          + 32L + directoryKeyLength + ServingIndexRecordCodec.directoryValueBytes(resultPages)
-          + emittedBytes + pendingBytes();
-    }
-
-    void appendTo(List<ArchiveIndexStorage.Mutation> batch) throws IOException {
-      if (appended.isEmpty()) {
-        return;
-      }
-      if (inlineAfterAppend()) {
-        batch.add(ArchiveIndexStorage.put(metaKey,
-            encodeKeyMeta(KeyMeta.inline(toArray(pagedEpochs())))));
-        return;
-      }
-      if (meta == null || meta.mode == INLINE) {
-        writePagedChanges(batch, key, pagedEpochs(), null, new ArrayList<>());
-      } else {
-        List<ServingIndexRecordCodec.PageDescriptor> pages = readDirectory();
-        ServingIndexRecordCodec.PageDescriptor tail = pages.get(pages.size() - 1);
-        writePagedChanges(batch, key, appended,
-            cachedTailPage(target, key, tail.pageId(), cache), pages);
-      }
-      batch.add(ArchiveIndexStorage.put(metaKey,
-          encodeKeyMeta(KeyMeta.paged(priorCount() + appended.size(),
-              meta == null ? appended.get(0) : meta.firstEpoch,
-              appended.get(appended.size() - 1)))));
-    }
-
-    private boolean inlineAfterAppend() {
-      return (meta == null || meta.mode == INLINE)
-          && priorCount() + appended.size() <= INLINE_EPOCH_LIMIT;
-    }
-
-    private long priorCount() {
-      return meta == null ? 0 : meta.count;
-    }
-
-    private List<Long> pagedEpochs() {
-      if (meta == null || meta.mode != INLINE) {
-        return appended;
-      }
-      List<Long> combined = asList(meta.inlineEpochs);
-      combined.addAll(appended);
-      return combined;
-    }
-
-    private List<ServingIndexRecordCodec.PageDescriptor> readDirectory() throws IOException {
-      return ServingIndexRecordCodec.decodePageDirectory(cachedDirectory(target, key, cache),
-          meta.count, meta.lastEpoch);
-    }
-
-    private void ensureSeeded() throws IOException {
-      if (seeded) {
-        return;
-      }
-      pageKeyLength = keyPageKey(key.dbName, key.rawKey, 0).length;
-      directoryKeyLength = ServingIndexKeyCodec
-          .keyPageDirectoryKey(key.dbName, key.rawKey).length;
-      effective = pagedEpochs();
-      if (meta != null && meta.mode != INLINE) {
-        List<ServingIndexRecordCodec.PageDescriptor> pages = readDirectory();
-        keptPages = pages.size();
-        ServingIndexRecordCodec.PageDescriptor tail = pages.get(keptPages - 1);
-        byte[] tailPage = cachedTailPage(target, key, tail.pageId(), cache);
-        ServingIndexRecordCodec.PageShape shape = ServingIndexRecordCodec.pageShape(tailPage, tail);
-        if (!ServingIndexRecordCodec.isPageFull(shape.dataBytes())) {
-          keptPages--; // the reopened tail replaces its own descriptor
-          restartInterval = shape.restartInterval();
-          shadowData = shape.dataBytes();
-          shadowEntries = shape.entries();
-          shadowSegments = shape.segmentCount();
-          shadowLast = tail.maxEpoch();
-        }
-      }
-      seeded = true;
-    }
-
-    /** Advances the shadow across all epochs not yet simulated; never encodes a page. */
-    private void simulate() throws IOException {
-      ensureSeeded();
-      for (; simulated < effective.size(); simulated++) {
-        long epoch = effective.get(simulated);
-        if (ServingIndexRecordCodec.isPageFull(shadowData)) {
-          emitShadow();
-        }
-        if (ServingIndexRecordCodec.isRestart(shadowEntries, restartInterval)) {
-          shadowSegments++;
-          shadowData += ServingIndexRecordCodec.heightValueBytes(epoch);
-        } else {
-          shadowData += ServingIndexRecordCodec.heightValueBytes(epoch - shadowLast);
-        }
-        shadowLast = epoch;
-        shadowEntries++;
-      }
-    }
-
-    private void emitShadow() {
-      emittedBytes += pendingBytes();
-      emittedCount++;
-      shadowData = 0;
-      shadowEntries = 0;
-      shadowSegments = 0;
-      restartInterval = ServingIndexRecordCodec.RESTART_INTERVAL;
-    }
-
-    private int pendingPages() {
-      return shadowEntries > 0 ? 1 : 0;
-    }
-
-    private long pendingBytes() {
-      return shadowEntries > 0
-          ? 32L + pageKeyLength + ServingIndexRecordCodec.pageValueBytes(shadowData, shadowSegments)
-          : 0;
-    }
+  private static List<ServingIndexRecordCodec.PageDescriptor> readDirectory(
+      ArchiveIndexStorage.Writer target, ExactKey key, KeyMeta meta) throws IOException {
+    return ServingIndexRecordCodec.decodePageDirectory(
+        target.get(ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey)),
+        meta.count, meta.lastEpoch);
   }
 
   /**

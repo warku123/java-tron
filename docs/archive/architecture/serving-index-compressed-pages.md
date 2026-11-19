@@ -2,8 +2,8 @@
 
 ## 范围
 
-本次调整 Serving Index 的高度分页、跨页定位与目录时机，不修改 History 正文、
-Chainbase key 身份、INLINE 门槛、查询读取上界或后台构建状态机。
+本次调整 Serving Index 的高度分页、跨页定位与目录时机，并合入 Blade 的批次简化。
+不修改 History 正文、Chainbase key 身份、INLINE 门槛、查询上界或水位发布语义。
 
 设计记录：
 <https://troneco.atlassian.net/wiki/spaces/javatronx/pages/2604826647/Serving+Index+Geth>。
@@ -22,11 +22,11 @@ Chainbase key 身份、INLINE 门槛、查询读取上界或后台构建状态�
 | segmentData | 变长 | 每段首条完整高度，后续条目为严格正差值，均为 Uvarint |
 | restartOffsets | 2 × segmentCount | 尾部偏移表，相对段数据区的字节偏移，首项为 0 |
 
-**页按字节滚动，不按条数**：追加前检查 `dataBytes + 8 > 4096`（对齐 Geth
-`estimateFull` 的 8B 预估，Java 非负 long varint 最多 9B，因此末次追加可把
-数据区推到 4097B）。4096B 只约束高度编码数据区，页头、restart 表和 CRC 在外，
-完整页 value 必然大于 4096B。每条至少 1B，故条数上界 4097；连续高度时一页
-可容纳数千条（起点 101 的连续高度实测 4074 条），大差值时少于此。
+**页按字节滚动，不按条数**：追加前检查 `dataBytes + 8 > 4096`，对齐 Geth
+无 extension 的 `estimateFull`。已有 4088 B 时仍可追加；Java 非负 `long` 的
+Uvarint 最多 9 B，最后一条可把数据区推到 4097 B。4096 B 是高度数据区的滚动预算，
+不含页头、restart 表和 CRC，不是完整页 value 的上限。每条至少 1 B，故条数上界 4097；
+连续高度时一页可容纳数千条（起点 101 的连续高度实测 4074 条），大差值时少于此。
 段数不单独存储，由头部推导：`ceil(count / restartInterval)`；
 不要求页条数与 restart 段长整除，页的最后一段允许不满，新页重新开段。
 偏移表放在页尾（对齐 Geth 块尾 restart 表），使追加只需拼接字节、不必移动旧数据；
@@ -37,7 +37,7 @@ Chainbase key 身份、INLINE 门槛、查询读取上界或后台构建状态�
 版本升级；旧定长页首字节为 0，读端拒绝该布局。保留旧页 golden 样本作为拒绝测试，
 descriptor、coverage、原有 KeyMeta 和 key 的 golden 字节保持不变。
 
-查询按 Geth `seekGT` 对齐：以段首绝对高度为锚点二分（每步就地解码一个 varint），
+查询采用 Geth `seekGT` 的策略：以段首绝对高度为锚点二分（每步就地解码一个 varint），
 只顺序扫描目标段，不再整页解码为 `long[]`；首/末高度与页条数有独立的局部读取
 接口用于一致性校验。不声称减少物理磁盘 IO；KV get 数量与物理 IO 不等价。
 
@@ -76,8 +76,8 @@ KeyMeta 保持原有字段结构，模式语义调整为：
 ## 追加、迁移与崩溃恢复
 
 新写页一律使用压缩格式，统一走单次提交内的 `PageWriter`：逐条追加前检查
-字节预算，满了就 finish 当前页、页号 +1 开新页。已写满页不再读取或改写；
-未满尾页由 `PageWriter(encoded, descriptor)` 重开——只解析页头、CRC 与
+字节预算，满了就 finish 当前页、页号 +1 开新页。旧尾页即使已满也会读取并校验，
+但不会改写；未满尾页由 `PageWriter(encoded, descriptor)` 重开——只解析页头、CRC 与
 restart 偏移，不解码旧高度字节，原样保留数据前缀，只拼接新高度的差分 varint
 （差值基准取描述符 max，等价 Geth 内存 desc.max），段满时追加 restart 锚点，
 重算 CRC 后整条写回。页头 count 会更新，因此"value 前缀逐字节不变"只对
@@ -90,11 +90,16 @@ KeyMeta 与描述符（Geth 同样信任 desc），旧页内容校验由 CRC、�
 目录更新：解码旧目录→重开尾页描述符被新描述符替换→按需追加新页描述符→
 整条重编码写回（定长描述符复制，无变长重算）。
 
-每个 key 的页、目录、KeyMeta 属于同一个 mutation group，普通 batch 原子提交，
-SOLO 分块不拆开该组；目录新增的 mutations/字节参与现有预算计算。
-一个不可拆 key 组仍遵循现有预算例外，不通过拆组破坏一致性。
-coverage 和进度仍最后发布；R-IDEM 仍由 KeyMeta.last 判断，目录模式的重放还校验目录。
-原生 snapshot 固定目录、页及读取上界，`I+1` 残留仍不可见。
+默认每次从 History 读取最多 1000 块，按 32 MiB 选择读取窗口；第一块即使超出也会读取。
+从已解码窗口逐块累积，加入完整区块后检查软阈值：估算达到 60 MiB 或 450,000 次 mutation
+就提交，跨过阈值的区块不拆也不退回。估算不读索引库，不是实际写入的硬上限。
+同一已解码窗口有剩余块时直接复用，不重新读取 History。
+
+正式提交按聚合后的 key 读取 KeyMeta，分页 key 再读目录和尾页。索引数据、coverage
+和进度一次同步原子提交；不再写新的 SOLO 分块。旧 SOLO 仍按 KeyMeta.last 做 R-IDEM，
+目录模式重放时还会校验目录。原生 snapshot 固定目录、页及读取上界，`I+1` 残留仍不可见。
+与 Geth 对齐的是无 extension 分页、Uvarint/restart 编码和后继查找策略，不是落盘格式、
+批次、进度发布或恢复机制。
 
 按与 Blade 确认的实施口径，保留 `VERSION=4`、`EXACT_VERSION=5`，不新增 descriptor
 版本，不增加多版本分类函数，也不增加打开时升级 descriptor 的维护写入。
@@ -153,7 +158,7 @@ INLINE（≤4 条）高度保持定长 8B/条，不改差分 Uvarint。评估结
 数据前缀复用）及段锚点二分查询。
 字节滚动专项：1B/条与 5B/差值两种序列得到不同的页条数（4089/819），
 证明分页由字节而非条数驱动；默认段长下起点 101 的连续高度首页为 4074 条，
-完整页 value 大于 4096B 预算。
+该页完整 value 大于 4096 B。另测 `4088 + 9 = 4097 B` 的数据区边界。
 批量无关性在 codec 层与 Store 层双重验证：6000 条随机高度单趟分页 vs
 随机分块逐次重开尾页，页字节逐一相等；整库一次性提交 5000 块 vs
 100×50 块分批提交，页/目录/KeyMeta 字节逐一相等。
