@@ -692,17 +692,16 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
         throw new ArchivePersistenceException("Serving directory has no successor page");
       }
       ServingIndexRecordCodec.PageDescriptor page = pages.get(low);
-      byte[] encodedPage = readPageBytes(dbName, rawKey, page.pageId());
-      if (ServingIndexRecordCodec.pageEpochCount(encodedPage) != page.entries()
-          || ServingIndexRecordCodec.lastEpochOf(encodedPage) != page.maxEpoch()
+      ServingIndexRecordCodec.PageView view =
+          new ServingIndexRecordCodec.PageView(readPageBytes(dbName, rawKey, page.pageId()));
+      if (view.count() != page.entries()
+          || view.lastEpoch() != page.maxEpoch()
           || (low == 0
-              ? ServingIndexRecordCodec.firstEpochOf(encodedPage) != meta.firstEpoch
-              : ServingIndexRecordCodec.firstEpochOf(encodedPage)
-                  <= pages.get(low - 1).maxEpoch())) {
+              ? view.firstEpoch() != meta.firstEpoch
+              : view.firstEpoch() <= pages.get(low - 1).maxEpoch())) {
         throw new ArchivePersistenceException("Serving directory differs from its page");
       }
-      return bounded(ServingIndexRecordCodec.firstEpochGreaterThan(
-          encodedPage, targetBlock), upperBound);
+      return bounded(view.firstEpochGreaterThan(targetBlock), upperBound);
     }
     throw new ArchivePersistenceException("Unknown serving key metadata mode");
   }

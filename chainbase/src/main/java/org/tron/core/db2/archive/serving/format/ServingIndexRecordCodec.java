@@ -165,22 +165,17 @@ public final class ServingIndexRecordCodec {
 
   /** Page header entry count without decoding, the counterpart of Geth's desc.entries. */
   public static int pageEpochCount(byte[] encoded) {
-    return parsePageLayout(encoded).count;
+    return new PageView(encoded).count();
   }
 
   /** First height: the restart-zero anchor, decodable in place at data offset zero. */
   public static long firstEpochOf(byte[] encoded) {
-    PageLayout page = parsePageLayout(encoded);
-    return readUvarint(ByteBuffer.wrap(page.payload, page.dataOffset,
-        page.payload.length - page.dataOffset));
+    return new PageView(encoded).firstEpoch();
   }
 
   /** Last height: decodes only the final restart segment, the counterpart of sectionLast. */
   public static long lastEpochOf(byte[] encoded) {
-    PageLayout page = parsePageLayout(encoded);
-    int[] offsets = restartOffsets(page);
-    long[] values = decodeSegment(page, offsets, page.segmentCount - 1);
-    return values[values.length - 1];
+    return new PageView(encoded).lastEpoch();
   }
 
   /**
@@ -189,30 +184,70 @@ public final class ServingIndexRecordCodec {
    * {@code target}, or empty when the whole page ends at or below it.
    */
   public static OptionalLong firstEpochGreaterThan(byte[] encoded, long target) {
-    PageLayout page = parsePageLayout(encoded);
-    int[] offsets = restartOffsets(page);
-    int low = 0;
-    int high = page.segmentCount;
-    while (low < high) {
-      int middle = (low + high) >>> 1;
-      if (anchorEpoch(page, offsets, middle) <= target) {
-        low = middle + 1;
-      } else {
-        high = middle;
+    return new PageView(encoded).firstEpochGreaterThan(target);
+  }
+
+  /**
+   * One CRC-validated parse of an encoded page, shared by every read of that page within a
+   * single query: checksum, header and restart offsets are computed once, then the entry
+   * count, boundary heights and successor search reuse them. No cross-query caching.
+   */
+  public static final class PageView {
+    private final PageLayout page;
+    private final int[] offsets;
+
+    /** Parses and CRC-checks the encoded page, including its restart offset table. */
+    public PageView(byte[] encoded) {
+      page = parsePageLayout(encoded);
+      offsets = restartOffsets(page);
+    }
+
+    /** Page header entry count, the counterpart of Geth's desc.entries. */
+    public int count() {
+      return page.count;
+    }
+
+    /** First height: the restart-zero anchor, decodable in place at data offset zero. */
+    public long firstEpoch() {
+      return readUvarint(ByteBuffer.wrap(page.payload, page.dataOffset,
+          page.payload.length - page.dataOffset));
+    }
+
+    /** Last height: decodes only the final restart segment, the counterpart of sectionLast. */
+    public long lastEpoch() {
+      long[] values = decodeSegment(page, offsets, page.segmentCount - 1);
+      return values[values.length - 1];
+    }
+
+    /**
+     * Geth seekGT alignment: binary-searches the restart anchors by decoding only each anchor's
+     * absolute height, then scans a single segment. Returns the first height greater than
+     * {@code target}, or empty when the whole page ends at or below it.
+     */
+    public OptionalLong firstEpochGreaterThan(long target) {
+      int low = 0;
+      int high = page.segmentCount;
+      while (low < high) {
+        int middle = (low + high) >>> 1;
+        if (anchorEpoch(page, offsets, middle) <= target) {
+          low = middle + 1;
+        } else {
+          high = middle;
+        }
       }
-    }
-    int candidate = low == page.segmentCount
-        ? page.segmentCount - 1 : StrictMathWrapper.max(low - 1, 0);
-    long[] values = decodeSegment(page, offsets, candidate);
-    for (long value : values) {
-      if (value > target) {
-        return OptionalLong.of(value);
+      int candidate = low == page.segmentCount
+          ? page.segmentCount - 1 : StrictMathWrapper.max(low - 1, 0);
+      long[] values = decodeSegment(page, offsets, candidate);
+      for (long value : values) {
+        if (value > target) {
+          return OptionalLong.of(value);
+        }
       }
+      if (candidate + 1 < page.segmentCount) {
+        return OptionalLong.of(anchorEpoch(page, offsets, candidate + 1));
+      }
+      return OptionalLong.empty();
     }
-    if (candidate + 1 < page.segmentCount) {
-      return OptionalLong.of(anchorEpoch(page, offsets, candidate + 1));
-    }
-    return OptionalLong.empty();
   }
 
   /**

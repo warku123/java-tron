@@ -206,8 +206,7 @@ public class ServingIndexServiceTest {
   public void synchronousOversizedAndNoChangeTargetsReopenWithExactIndex() throws Exception {
     History history = history(1);
     ServingIndexService service = service(history,
-        config().setMaxSourceBytes(1024L * 1024).setMaxWriteMutations(64)
-            .setMaxWriteBytes(64 * 1024), ServingIndexService.Hooks.NONE);
+        config().setMaxSourceBytes(1024L * 1024), ServingIndexService.Hooks.NONE);
     CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
     service.onCommonPublished(first);
     assertTrue(awaitThrough(service, 1));
@@ -301,8 +300,7 @@ public class ServingIndexServiceTest {
   public void oversizedBlockIsIndexedInOneAtomicBatch() throws Exception {
     History history = history(1);
     AtomicInteger writes = new AtomicInteger();
-    ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024)
-        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024),
+    ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024),
         new ServingIndexService.Hooks() {
           @Override
           public void afterCommit(long first, long last) {
@@ -653,7 +651,7 @@ public class ServingIndexServiceTest {
     CountDownLatch inChunk = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024)
-        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024).setCloseTimeoutMillis(300),
+        .setCloseTimeoutMillis(300),
         new ServingIndexService.Hooks() {
           @Override
           public void afterCommit(long first, long last) {

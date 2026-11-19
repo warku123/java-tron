@@ -51,8 +51,8 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  *       Receipt failure blocks further admission but never undoes committed History.</li>
  *   <li>Merged watermark (S2): the work range is always {@code (I, W]} of the published History
  *       boundary; notifications only wake the thread.</li>
- *   <li>Soft thresholds trigger a flush after a complete block, including an oversized one.
- *       Data and progress always share one atomic write.</li>
+ *   <li>One commit per selected History read window, oversized block included. Data and
+ *       progress always share one atomic write.</li>
  *   <li>Readiness (S5, S-INV-8): the initial state is derived from durable data; LIVE is entered
  *       when a commit reaches {@code I == W} and left when {@code W - I > live.maxLagBlocks}. No
  *       block-import call, no P2P signal.</li>
@@ -214,9 +214,6 @@ public final class ServingIndexService implements AutoCloseable {
 
   // Build-thread state.
   private ServingIndexStore store;
-  // Build-thread owned: at most one decoded source window, never a recovery authority.
-  private List<CommittedBlock> bufferedBlocks;
-  private int bufferedOffset;
 
   private long handleSeq;
   private ServingState state = ServingState.OPENING;
@@ -442,7 +439,7 @@ public final class ServingIndexService implements AutoCloseable {
     LockSupport.unpark(thread);
   }
 
-  /** Batch counters: normal, split read window, and legacy solo (always zero for new writes). */
+  /** Batch counters: window covering all of (I,W], catch-up window short of W, legacy solo. */
   long batches(int kind) {
     return batchCounters[kind];
   }
@@ -487,7 +484,6 @@ public final class ServingIndexService implements AutoCloseable {
         degrade(classify(failure), failure);
       }
     }
-    clearBufferedSource();
     publish();
   }
 
@@ -573,7 +569,7 @@ public final class ServingIndexService implements AutoCloseable {
     if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
       transition(ServingState.BULK_CATCH_UP, w);
     }
-    if (bufferedBlocks == null && !fastCatchUpRequested.get()
+    if (!fastCatchUpRequested.get()
         && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
         && config.getTailDelayMillis() > 0 && w - i < config.getBulkMinBlocks()) {
       if (pendingSinceMillis == 0) {
@@ -585,19 +581,8 @@ public final class ServingIndexService implements AutoCloseable {
         return remaining;
       }
     }
-    if (bufferedBlocks != null) {
-      long first = bufferedBlocks.get(bufferedOffset).getDiff().getMeta().getBlockNumber();
-      long last = bufferedBlocks.get(bufferedBlocks.size() - 1)
-          .getDiff().getMeta().getBlockNumber();
-      if (first != i + 1 || last > w) {
-        throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
-            "Buffered serving source no longer extends durable I within W");
-      }
-      buildRange(history, first, last, w);
-    } else {
-      ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
-      buildRange(history, selection.getFirst(), selection.getLast(), w);
-    }
+    ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
+    buildRange(history, selection.getFirst(), selection.getLast(), w);
     if (store.indexedThrough() == w) {
       pendingSinceMillis = 0;
       backlogObservedSinceMillis = 0;
@@ -617,50 +602,26 @@ public final class ServingIndexService implements AutoCloseable {
   private void buildRange(Committed history, long first, long last, long w)
       throws IOException {
     hooks.beforeBatch(first, last, false);
-    if (bufferedBlocks == null) {
-      bufferedBlocks = new ArrayList<>(source.read(history, first, last));
-      bufferedOffset = 0;
-    }
-    List<CommittedBlock> blocks = bufferedBlocks.subList(bufferedOffset, bufferedBlocks.size());
+    List<CommittedBlock> blocks = source.read(history, first, last);
     ServingIndexIncrementalPlan.Builder builder = new ServingIndexIncrementalPlan.Builder(
         store.indexedThrough(), store.headHash());
-    int k = 0;
     for (CommittedBlock block : blocks) {
       builder.add(block.getDiff(), block.getStepDigest());
-      k++;
-      if (builder.estimatedBytes() >= config.getMaxWriteBytes()
-          || builder.estimatedMutations() >= config.getMaxWriteMutations()) {
-        break;
-      }
     }
     requireOpen();
     ServingIndexIncrementalPlan plan = builder.build();
-    boolean split = k < blocks.size() || bufferedOffset > 0;
+    // A window short of W is one catch-up batch among several; never a partial write.
+    boolean split = plan.getIndexedThrough() < w;
     long started = System.nanoTime();
     try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
         plan.getIndexedFrom(), plan.getIndexedThrough())) {
       store.commit(plan, plan.getIndexedThrough() == w);
       timing.succeeded();
     }
-    consumeBuffered(k);
     hooks.afterCommit(plan.getIndexedFrom() + 1, plan.getIndexedThrough());
     batchCounters[split ? 1 : 0]++;
     ServingIndexTiming.batch(split ? "split" : "normal");
-    logBatch(plan, k, started);
-  }
-
-  private void consumeBuffered(int count) {
-    for (int index = 0; index < count; index++) {
-      bufferedBlocks.set(bufferedOffset++, null);
-    }
-    if (bufferedOffset == bufferedBlocks.size()) {
-      clearBufferedSource();
-    }
-  }
-
-  private void clearBufferedSource() {
-    bufferedBlocks = null;
-    bufferedOffset = 0;
+    logBatch(plan, blocks.size(), started);
   }
 
   private void logBatch(ServingIndexIncrementalPlan plan, int blocks, long started) {
@@ -807,7 +768,6 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   private void degrade(ServingFailure classified, Throwable cause) {
-    clearBufferedSource();
     ServingFailure failure = classified;
     this.failure = failure;
     lastFailure = failure;
@@ -929,7 +889,6 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   private void closeStoreQuietly() {
-    clearBufferedSource();
     ServingIndexStore handle = store;
     store = null;
     if (handle != null) {
@@ -1074,8 +1033,6 @@ public final class ServingIndexService implements AutoCloseable {
   public static final class Config {
     private int maxBlocks = 1000;
     private long maxSourceBytes = 32L * 1024 * 1024;
-    private long maxWriteMutations = 450_000;
-    private long maxWriteBytes = 60L * 1024 * 1024;
     private long tailDelayMillis;
     private long bulkMinBlocks = 1000;
     private long liveMaxLagBlocks = 100;
@@ -1113,11 +1070,6 @@ public final class ServingIndexService implements AutoCloseable {
       if (maxSourceBytes < 1024L * 1024) {
         throw new IllegalArgumentException("serving.batch.maxSourceBytes must be >= 1 MiB");
       }
-      requirePositive(maxWriteMutations, "batch.maxWriteMutations");
-      requirePositive(maxWriteBytes, "batch.maxWriteBytes");
-      if (maxWriteBytes > 1024L * 1024 * 1024) {
-        throw new IllegalArgumentException("serving.batch.maxWriteBytes must be <= 1 GiB");
-      }
       if (tailDelayMillis < 0 || tailDelayMillis > 60_000) {
         throw new IllegalArgumentException("serving.bulk.tailDelayMillis must be in [0, 60000]");
       }
@@ -1154,26 +1106,6 @@ public final class ServingIndexService implements AutoCloseable {
 
     public Config setMaxSourceBytes(long value) {
       maxSourceBytes = value;
-      return this;
-    }
-
-    /** Soft flush trigger; the final complete block may exceed it. */
-    public long getMaxWriteMutations() {
-      return maxWriteMutations;
-    }
-
-    public Config setMaxWriteMutations(long value) {
-      maxWriteMutations = value;
-      return this;
-    }
-
-    /** Estimated-byte soft flush trigger, not a physical WriteBatch size limit. */
-    public long getMaxWriteBytes() {
-      return maxWriteBytes;
-    }
-
-    public Config setMaxWriteBytes(long value) {
-      maxWriteBytes = value;
       return this;
     }
 
