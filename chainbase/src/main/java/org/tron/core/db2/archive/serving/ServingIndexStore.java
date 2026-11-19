@@ -17,11 +17,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.Descriptor;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.ExactKey;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.KeyStateCache;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.PersistentStoreCoverage;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.PreparedExactChanges;
 import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
 import org.tron.core.db2.archive.serving.status.ServingFailure.Reason;
 import org.tron.core.db2.archive.serving.status.ServingFailure.ServingFaultException;
 import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming;
@@ -60,6 +64,7 @@ final class ServingIndexStore implements Closeable {
   private volatile Descriptor descriptor;
   private volatile ServingStateRecord state;
   private long sequence;
+  private Object writeState = new Object();
   private volatile boolean failed;
   private volatile boolean closed;
 
@@ -323,25 +328,105 @@ final class ServingIndexStore implements Closeable {
     state = cleared;
   }
 
+  Preparation preparation() {
+    return new Preparation(writeState);
+  }
+
+  /** Request-local index reads, reusable for rejected prefixes but not after writing starts. */
+  static final class Preparation {
+    private final Object writeState;
+    private final KeyStateCache cache = new KeyStateCache();
+
+    private Preparation(Object writeState) {
+      this.writeState = writeState;
+    }
+  }
+
+  /** Selects a complete-block prefix without encoding pages or rebuilding prior prefixes. */
+  int fittingPrefix(List<CommittedBlock> blocks, ServingIndexService.Config config,
+      WriteBudget budget, long w, Preparation preparation) throws IOException {
+    requireWritable();
+    requirePreparation(preparation);
+    Map<ExactKey, PreparedExactChanges> keys = new LinkedHashMap<>();
+    long mutations = 0;
+    long bytes = 0;
+    int planLimit = new ServingBatchPlanner(config).planPrefix(blocks);
+    long previous = descriptor.indexedThrough();
+    byte[] previousHash = descriptor.headHash();
+    int accepted = 0;
+    for (CommittedBlock block : blocks) {
+      if (accepted == planLimit || accepted == config.getMaxBlocks()) {
+        break;
+      }
+      // Validate this block once. The final accepted plan is built only once after selection.
+      ServingIndexIncrementalPlan one = ServingIndexIncrementalPlan.planCommittedDiffs(
+          previous, previousHash, java.util.Collections.singletonList(block.getDiff()),
+          java.util.Collections.singletonList(block.getStepDigest()));
+      Next next = next(one, one.getIndexedThrough() == w);
+      for (BlockReverseDiff.DbGroup group : block.getDiff().getGroups()) {
+        for (BlockReverseDiff.Entry entry : group.getEntries()) {
+          ExactKey key = new ExactKey(group.getDbName(), entry.getKey());
+          PreparedExactChanges cumulative = keys.get(key);
+          if (cumulative == null) {
+            List<Long> epochs = new ArrayList<>();
+            epochs.add(one.getIndexedThrough());
+            cumulative = PersistentServingKeyIndexGeneration.prepareExactChanges(writer, key,
+                epochs, descriptor.indexedThrough(), preparation.cache);
+            keys.put(key, cumulative);
+          } else {
+            mutations -= cumulative.mutationCount();
+            bytes -= cumulative.estimatedBytes();
+            cumulative.appendEpoch(one.getIndexedThrough());
+          }
+          mutations += cumulative.mutationCount();
+          bytes += cumulative.estimatedBytes();
+        }
+      }
+      if (mutations + next.tail.size() > budget.maxMutations
+          || bytes + estimatedBytes(next.tail) > budget.maxBytes) {
+        // The probe is discarded. The rejected block remains in the source buffer.
+        break;
+      }
+      accepted++;
+      previous = one.getIndexedThrough();
+      previousHash = one.getHeadHash();
+    }
+    return accepted;
+  }
+
   /**
    * Commits one normal batch atomically, or returns {@code false} without writing anything when
-   * its mutations exceed the write budget (the caller then halves the batch, ch04 §3.5.3).
+   * its mutations exceed the write budget. Normal service batches use fittingPrefix first.
    */
   boolean commit(ServingIndexIncrementalPlan plan, WriteBudget budget, boolean clearRebuild)
       throws IOException {
+    return commit(plan, budget, clearRebuild, preparation());
+  }
+
+  boolean commit(ServingIndexIncrementalPlan plan, WriteBudget budget, boolean clearRebuild,
+      Preparation preparation) throws IOException {
     requireWritable();
     requireExtends(plan);
-    List<List<Mutation>> groups = keyGroups(plan);
+    requirePreparation(preparation);
     Next next = next(plan, clearRebuild);
     long count = next.tail.size();
     long bytes = estimatedBytes(next.tail);
-    for (List<Mutation> group : groups) {
-      count += group.size();
-      bytes += estimatedBytes(group);
+    if (count > budget.maxMutations || bytes > budget.maxBytes) {
+      return false;
+    }
+    List<PreparedExactChanges> prepared = new ArrayList<>();
+    for (Map.Entry<ExactKey, List<Long>> entry : changes(plan).entrySet()) {
+      PreparedExactChanges key = PersistentServingKeyIndexGeneration.prepareExactChanges(
+          writer, entry.getKey(), entry.getValue(), descriptor.indexedThrough(),
+          preparation.cache);
+      count += key.mutationCount();
+      bytes += key.estimatedBytes();
       if (count > budget.maxMutations || bytes > budget.maxBytes) {
         return false;
       }
+      prepared.add(key);
     }
+    List<List<Mutation>> groups = materialize(prepared);
     List<Mutation> batch = new ArrayList<>((int) count);
     groups.forEach(batch::addAll);
     batch.addAll(next.tail);
@@ -358,12 +443,18 @@ final class ServingIndexStore implements Closeable {
    */
   int commitSolo(ServingIndexIncrementalPlan plan, WriteBudget budget, boolean clearRebuild,
       ChunkHook hook) throws IOException {
+    return commitSolo(plan, budget, clearRebuild, hook, preparation());
+  }
+
+  int commitSolo(ServingIndexIncrementalPlan plan, WriteBudget budget, boolean clearRebuild,
+      ChunkHook hook, Preparation preparation) throws IOException {
     requireWritable();
     requireExtends(plan);
+    requirePreparation(preparation);
     if (plan.getIndexedThrough() != descriptor.indexedThrough() + 1) {
       throw new IllegalArgumentException("A solo serving batch covers exactly one block");
     }
-    List<List<Mutation>> groups = keyGroups(plan);
+    List<List<Mutation>> groups = keyGroups(plan, preparation);
     Next next = next(plan, clearRebuild);
     List<List<Mutation>> chunks = new ArrayList<>();
     List<Mutation> current = new ArrayList<>();
@@ -407,8 +498,13 @@ final class ServingIndexStore implements Closeable {
     }
   }
 
-  /** Key-atomic groups (S-INV-13): one key's pages, optional directory, then KeyMeta. */
-  private List<List<Mutation>> keyGroups(ServingIndexIncrementalPlan plan) throws IOException {
+  private void requirePreparation(Preparation preparation) {
+    if (preparation.writeState != writeState) {
+      throw new IllegalStateException("Serving preparation predates a write attempt");
+    }
+  }
+
+  private Map<ExactKey, List<Long>> changes(ServingIndexIncrementalPlan plan) {
     Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
@@ -417,13 +513,31 @@ final class ServingIndexStore implements Closeable {
             ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }
-    long durable = descriptor.indexedThrough();
-    List<List<Mutation>> groups = new ArrayList<>(changes.size());
+    return changes;
+  }
+
+  private List<List<Mutation>> keyGroups(ServingIndexIncrementalPlan plan,
+      Preparation preparation) throws IOException {
+    List<PreparedExactChanges> prepared = new ArrayList<>();
+    for (Map.Entry<ExactKey, List<Long>> entry : changes(plan).entrySet()) {
+      prepared.add(PersistentServingKeyIndexGeneration.prepareExactChanges(writer,
+          entry.getKey(), entry.getValue(), descriptor.indexedThrough(), preparation.cache));
+    }
+    return materialize(prepared);
+  }
+
+  /** Key-atomic groups (S-INV-13): one key's pages, directory (if paged), then KeyMeta. */
+  private List<List<Mutation>> materialize(List<PreparedExactChanges> prepared)
+      throws IOException {
+    List<List<Mutation>> groups = new ArrayList<>(prepared.size());
     long started = System.nanoTime();
-    for (Map.Entry<ExactKey, List<Long>> entry : changes.entrySet()) {
+    for (PreparedExactChanges key : prepared) {
       List<Mutation> group = new ArrayList<>(2);
-      PersistentServingKeyIndexGeneration.appendExactChanges(writer, group, entry.getKey(),
-          entry.getValue(), durable);
+      key.appendTo(group);
+      // Keep the estimator tied to actual codecs: never publish an underestimated batch.
+      if (group.size() != key.mutationCount() || estimatedBytes(group) != key.estimatedBytes()) {
+        throw new IllegalStateException("Serving mutation size differs from preflight");
+      }
       if (!group.isEmpty()) {
         groups.add(group);
       }
@@ -468,6 +582,8 @@ final class ServingIndexStore implements Closeable {
   }
 
   private void write(List<Mutation> batch) throws IOException {
+    // An interrupted SOLO can change keys without advancing the progress descriptor.
+    writeState = new Object();
     long started = System.nanoTime();
     try {
       writer.write(batch, true);

@@ -209,13 +209,16 @@ public class ServingIndexDirectoryTest {
     try (ServingIndexStore store = open(directory)) {
       assertTrue(store.commit(plan(store, blocks(B0, 1024, 80)), LARGE, false));
       ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));
+      ServingIndexStore.Preparation preparation = store.preparation();
       assertThrows(IOException.class, () -> store.commitSolo(next, TINY, false,
           (index, count) -> {
             if (index == 1) {
               throw new IOException("interrupt after a directory-bearing key group");
             }
-          }));
+          }, preparation));
       assertEquals(B0 + 1023, store.indexedThrough());
+      assertThrows(IllegalStateException.class,
+          () -> store.commitSolo(next, TINY, false, ServingIndexStore.ChunkHook.NONE, preparation));
     }
     try (ServingIndexStore store = open(directory)) {
       ServingIndexIncrementalPlan next = plan(store, blocks(B0 + 1024, 1, 80));

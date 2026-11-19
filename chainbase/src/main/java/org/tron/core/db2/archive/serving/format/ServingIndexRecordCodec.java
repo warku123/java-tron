@@ -28,7 +28,7 @@ public final class ServingIndexRecordCodec {
   public static final int INLINE_EPOCH_LIMIT = 4;
   /**
    * Geth-aligned rolling budget for a page's encoded height bytes. The page header, restart
-   * offset table and CRC live outside it, so a finished page value is larger than this.
+   * offset table and CRC live outside it; this is not a page value size limit.
    */
   public static final int PAGE_DATA_BUDGET = 4096;
   /**
@@ -43,6 +43,35 @@ public final class ServingIndexRecordCodec {
   public static final int RESTART_INTERVAL = 256;
   private static final byte COMPRESSED_PAGE = 1;
   private static final byte DIRECTORY_VERSION = 1;
+  private static final int KEY_META_BYTES = 1 + 3 * Long.BYTES + Integer.BYTES;
+  private static final int PAGE_HEADER_BYTES = 1 + Integer.BYTES + Short.BYTES;
+  private static final int DIRECTORY_HEADER_BYTES = 1 + Integer.BYTES;
+  private static final int PAGE_DESCRIPTOR_BYTES = Long.BYTES + Short.BYTES + Integer.BYTES;
+
+  /** Encoded KeyMeta length; zero inline entries denotes paged metadata. */
+  public static int keyMetaValueBytes(int inlineEntries) {
+    return KEY_META_BYTES + (inlineEntries == 0 ? 0 : Integer.BYTES + inlineEntries * Long.BYTES);
+  }
+
+  public static long directoryValueBytes(long pageCount) {
+    return DIRECTORY_HEADER_BYTES + pageCount * PAGE_DESCRIPTOR_BYTES + Integer.BYTES;
+  }
+
+  public static int pageValueBytes(int dataBytes, int segments) {
+    return PAGE_HEADER_BYTES + dataBytes + segments * Short.BYTES + Integer.BYTES;
+  }
+
+  public static boolean isPageFull(int dataBytes) {
+    return dataBytes + Long.BYTES > PAGE_DATA_BUDGET;
+  }
+
+  public static boolean isRestart(int entries, int restartInterval) {
+    return entries % restartInterval == 0;
+  }
+
+  public static int heightValueBytes(long value) {
+    return (70 - Long.numberOfLeadingZeros(value | 1L)) / 7;
+  }
 
   public static byte[] encodeKeyMeta(KeyMetadataView meta) {
     try {
@@ -147,6 +176,47 @@ public final class ServingIndexRecordCodec {
     return parsePageLayout(encoded).count;
   }
 
+  /**
+   * Structural page dimensions without decoding any height, for exact write-budget
+   * preflight; mirrors what {@link PageWriter} reopens from the same bytes.
+   */
+  public static PageShape pageShape(byte[] encoded, PageDescriptor descriptor) {
+    PageLayout page = parseTailLayout(encoded, descriptor);
+    restartOffsets(page);
+    return new PageShape(page.count, page.restartInterval, page.segmentCount, page.dataLength);
+  }
+
+  /** Read-only dimensions of one encoded page. */
+  public static final class PageShape {
+    private final int entries;
+    private final int restartInterval;
+    private final int segmentCount;
+    private final int dataBytes;
+
+    private PageShape(int entries, int restartInterval, int segmentCount, int dataBytes) {
+      this.entries = entries;
+      this.restartInterval = restartInterval;
+      this.segmentCount = segmentCount;
+      this.dataBytes = dataBytes;
+    }
+
+    public int entries() {
+      return entries;
+    }
+
+    public int restartInterval() {
+      return restartInterval;
+    }
+
+    public int segmentCount() {
+      return segmentCount;
+    }
+
+    public int dataBytes() {
+      return dataBytes;
+    }
+  }
+
   /** First height: the restart-zero anchor, decodable in place at data offset zero. */
   public static long firstEpochOf(byte[] encoded) {
     PageLayout page = parsePageLayout(encoded);
@@ -221,10 +291,7 @@ public final class ServingIndexRecordCodec {
 
     /** Reopens a tail page without decoding its heights; descriptor fields are trusted. */
     public PageWriter(byte[] encoded, PageDescriptor descriptor) {
-      PageLayout page = parsePageLayout(encoded);
-      if (page.count != descriptor.entries()) {
-        throw new ArchivePersistenceException("Serving tail page differs from metadata");
-      }
+      PageLayout page = parseTailLayout(encoded, descriptor);
       restartInterval = page.restartInterval;
       int[] offsets = restartOffsets(page);
       for (int segment = 0; segment < page.segmentCount; segment++) {
@@ -236,7 +303,7 @@ public final class ServingIndexRecordCodec {
     }
 
     public boolean isFull() {
-      return heightBytes.size() + Long.BYTES > PAGE_DATA_BUDGET;
+      return isPageFull(heightBytes.size());
     }
 
     public void append(long epoch) {
@@ -246,7 +313,7 @@ public final class ServingIndexRecordCodec {
       if (isFull()) {
         throw new ArchivePersistenceException("Serving page byte budget is exhausted");
       }
-      if (count % restartInterval == 0) {
+      if (isRestart(count, restartInterval)) {
         segmentOffsets.add(heightBytes.size());
         writeUvarint(heightBytes, epoch);
       } else {
@@ -266,7 +333,7 @@ public final class ServingIndexRecordCodec {
       }
       byte[] encodedHeights = heightBytes.toByteArray();
       ByteBuffer payload = ByteBuffer.allocate(
-          7 + encodedHeights.length + segmentOffsets.size() * Short.BYTES);
+          pageValueBytes(encodedHeights.length, segmentOffsets.size()) - Integer.BYTES);
       payload.put(COMPRESSED_PAGE).putInt(count).putShort((short) restartInterval)
           .put(encodedHeights);
       for (int offset : segmentOffsets) {
@@ -274,6 +341,14 @@ public final class ServingIndexRecordCodec {
       }
       return withChecksum(payload.array());
     }
+  }
+
+  private static PageLayout parseTailLayout(byte[] encoded, PageDescriptor descriptor) {
+    PageLayout page = parsePageLayout(encoded);
+    if (page.count != descriptor.entries()) {
+      throw new ArchivePersistenceException("Serving tail page differs from metadata");
+    }
+    return page;
   }
 
   /** Structural page view shared by full decode, append, seek and partial reads. */
@@ -300,7 +375,7 @@ public final class ServingIndexRecordCodec {
 
   private static PageLayout parsePageLayout(byte[] encoded) {
     byte[] payload = checkedPayload(encoded, "exact serving epoch page");
-    if (payload.length < 7 + Short.BYTES || payload[0] != COMPRESSED_PAGE) {
+    if (payload.length < PAGE_HEADER_BYTES + Short.BYTES || payload[0] != COMPRESSED_PAGE) {
       throw new ArchivePersistenceException("Invalid or truncated compressed serving page");
     }
     int count = ByteBuffer.wrap(payload, 1, Integer.BYTES).getInt();
@@ -311,11 +386,12 @@ public final class ServingIndexRecordCodec {
     }
     int segmentCount = (count - 1) / restartInterval + 1;
     int offsetsOffset = payload.length - segmentCount * Short.BYTES;
-    if (offsetsOffset < 7 + count || offsetsOffset - 7 > MAX_PAGE_ENTRIES) {
+    if (offsetsOffset < PAGE_HEADER_BYTES + count
+        || offsetsOffset - PAGE_HEADER_BYTES > MAX_PAGE_ENTRIES) {
       throw new ArchivePersistenceException("Invalid compressed serving page header");
     }
     return new PageLayout(payload, count, restartInterval, segmentCount,
-        7, offsetsOffset - 7, offsetsOffset);
+        PAGE_HEADER_BYTES, offsetsOffset - PAGE_HEADER_BYTES, offsetsOffset);
   }
 
   private static int[] restartOffsets(PageLayout page) {
@@ -388,10 +464,11 @@ public final class ServingIndexRecordCodec {
    * first page, because byte-budgeted page dimensions cannot be derived from KeyMeta.
    */
   public static byte[] encodePageDirectory(List<PageDescriptor> pages) {
-    if (pages.isEmpty() || pages.size() > (Integer.MAX_VALUE - 9) / 14) {
+    long valueBytes = directoryValueBytes(pages.size());
+    if (pages.isEmpty() || valueBytes > Integer.MAX_VALUE) {
       throw new ArchivePersistenceException("Invalid serving page directory dimensions");
     }
-    ByteBuffer payload = ByteBuffer.allocate(5 + pages.size() * 14);
+    ByteBuffer payload = ByteBuffer.allocate((int) valueBytes - Integer.BYTES);
     payload.put(DIRECTORY_VERSION).putInt(pages.size());
     long previous = -1;
     for (int index = 0; index < pages.size(); index++) {
@@ -407,14 +484,13 @@ public final class ServingIndexRecordCodec {
   public static List<PageDescriptor> decodePageDirectory(byte[] encoded,
       long expectedEntries, long lastEpoch) {
     byte[] payload = checkedPayload(encoded, "serving page directory");
-    if (payload.length < 19 || payload[0] != DIRECTORY_VERSION) {
+    if (encoded.length < directoryValueBytes(1) || payload[0] != DIRECTORY_VERSION) {
       throw new ArchivePersistenceException("Invalid serving page directory dimensions");
     }
     ByteBuffer input = ByteBuffer.wrap(payload);
     input.get();
     int pageCount = input.getInt();
-    if (pageCount <= 0 || pageCount > (Integer.MAX_VALUE - 9) / 14
-        || input.remaining() != (long) pageCount * 14) {
+    if (pageCount <= 0 || encoded.length != directoryValueBytes(pageCount)) {
       throw new ArchivePersistenceException("Invalid serving page directory dimensions");
     }
     List<PageDescriptor> pages = new ArrayList<>(pageCount);
