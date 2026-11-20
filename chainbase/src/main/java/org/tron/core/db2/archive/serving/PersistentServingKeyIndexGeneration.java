@@ -1224,9 +1224,19 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
 
   private static List<ServingIndexRecordCodec.PageDescriptor> readDirectory(
       ArchiveIndexStorage.Writer target, ExactKey key, KeyMeta meta) throws IOException {
-    return ServingIndexRecordCodec.decodePageDirectory(
-        target.get(ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey)),
-        meta.count, meta.lastEpoch);
+    long started = System.nanoTime();
+    byte[] encoded;
+    try {
+      encoded = target.get(ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey));
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.DIRECTORY_GET, started);
+    }
+    long decoded = System.nanoTime();
+    try {
+      return ServingIndexRecordCodec.decodePageDirectory(encoded, meta.count, meta.lastEpoch);
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.DIRECTORY_CODEC, decoded);
+    }
   }
 
   /**
@@ -1239,6 +1249,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       ExactKey key, List<Long> epochs, byte[] encodedTail,
       List<ServingIndexRecordCodec.PageDescriptor> pages) {
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey);
+    long started = System.nanoTime();
     ServingIndexRecordCodec.PageWriter writer;
     int pageId;
     if (pages.isEmpty()) {
@@ -1263,8 +1274,14 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       writer.append(epoch);
     }
     emitPage(batch, key, writer, pageId, pages);
-    batch.add(ArchiveIndexStorage.put(directoryKey,
-        ServingIndexRecordCodec.encodePageDirectory(pages)));
+    ServingIndexTiming.record(ServingIndexTiming.Stage.PAGE_ENCODE, started);
+    long encoded = System.nanoTime();
+    try {
+      batch.add(ArchiveIndexStorage.put(directoryKey,
+          ServingIndexRecordCodec.encodePageDirectory(pages)));
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.DIRECTORY_CODEC, encoded);
+    }
   }
 
   private static void emitPage(List<ArchiveIndexStorage.Mutation> batch, ExactKey key,

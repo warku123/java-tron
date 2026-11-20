@@ -26,7 +26,8 @@ public final class ServingIndexTiming implements AutoCloseable {
   private long writeBytes;
 
   public enum Stage {
-    PLAN, DIGEST, GROUP, BUILD, META_GET, TAIL_GET, WRITE_SYNC
+    PLAN, DIGEST, GROUP, BUILD, META_GET, TAIL_GET, WRITE_SYNC,
+    DIRECTORY_GET, DIRECTORY_CODEC, PAGE_ENCODE
   }
 
   public ServingIndexTiming(String mode, long from, long through) {
@@ -103,8 +104,8 @@ public final class ServingIndexTiming implements AutoCloseable {
   public void close() {
     CURRENT.remove();
     long elapsed = System.nanoTime() - started;
-    // DIGEST is inside PLAN; TAIL_GET is inside BUILD. META_GET may precede BUILD.
-    // Do not sum parent and child times.
+    // DIGEST is inside PLAN; TAIL_GET, GROUP, DIRECTORY_GET, DIRECTORY_CODEC and PAGE_ENCODE
+    // are inside BUILD. META_GET may precede BUILD. Do not sum parent and child times.
     LOGGER.info("Serving index batch: mode={}, from={}, through={}, success={}, entries={}, "
             + "uniqueKeys={}, writeBytes={}, totalUs={}, stageUs={}, stageCalls={}",
         mode, from, through, success, entries, uniqueKeys, writeBytes, elapsed / 1000,

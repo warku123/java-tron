@@ -327,7 +327,10 @@ final class ServingIndexStore implements Closeable {
     Next next = next(plan, clearRebuild);
     List<Mutation> batch = new ArrayList<>();
     long started = System.nanoTime();
-    for (Map.Entry<ExactKey, List<Long>> entry : changes(plan).entrySet()) {
+    long grouped = System.nanoTime();
+    Map<ExactKey, List<Long>> changeMap = changes(plan);
+    ServingIndexTiming.record(ServingIndexTiming.Stage.GROUP, grouped);
+    for (Map.Entry<ExactKey, List<Long>> entry : changeMap.entrySet()) {
       PersistentServingKeyIndexGeneration.appendExactChanges(writer, batch, entry.getKey(),
           entry.getValue(), descriptor.indexedThrough());
     }
