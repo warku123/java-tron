@@ -98,7 +98,11 @@ mutation）已删除，也不读索引库预估写入量；来多少块就一次
 Geth 内部按 8M 条真实变更和已构建 batch 的实际大小分次落盘，那一层不照搬，
 因为索引数据、coverage 和进度必须同批原子发布。
 
-正式提交按聚合后的 key 读取 KeyMeta，分页 key 再读目录和尾页。索引数据、coverage
+正式提交按聚合后的 key 读取 KeyMeta，分页 key 再读目录和尾页。分组后的 key 可由有界
+worker 并行准备（`tron.archive.serving.buildThreads`，默认 1 即原串行路径）：worker 只读
+KeyMeta／目录／尾页并各自产出 mutation，同一 key 的全部高度仍在单个 worker 上按序追加；
+构建线程等待全部 worker 退出后按原顺序合并，仍执行唯一的一次同步原子写，任何 worker
+失败都不产生写入，产出与串行路径逐字节一致。索引数据、coverage
 和进度一次同步原子提交；不再写新的 SOLO 分块。旧 SOLO 仍按 KeyMeta.last 做 R-IDEM，
 目录模式重放时还会校验目录。原生 snapshot 固定目录、页及读取上界，`I+1` 残留仍不可见。
 与 Geth 对齐的是无 extension 分页、Uvarint/restart 编码和后继查找策略，不是落盘格式、

@@ -16,10 +16,12 @@ public final class ServingIndexTiming implements AutoCloseable {
   private static final ThreadLocal<ServingIndexTiming> CURRENT = new ThreadLocal<>();
   private final EnumMap<Stage, Long> nanos = new EnumMap<>(Stage.class);
   private final EnumMap<Stage, Long> calls = new EnumMap<>(Stage.class);
-  private final long started = System.nanoTime();
+  private final long started;
   private final String mode;
   private final long from;
   private final long through;
+  /** Non-null only for a parallel worker scope that releases into its creating batch scope. */
+  private final ServingIndexTiming parent;
   private boolean success;
   private long entries;
   private long uniqueKeys;
@@ -34,9 +36,35 @@ public final class ServingIndexTiming implements AutoCloseable {
     if (CURRENT.get() != null) {
       throw new IllegalStateException("Serving timing scopes must not overlap");
     }
+    this.parent = null;
     this.mode = mode;
     this.from = from;
     this.through = through;
+    this.started = System.nanoTime();
+    CURRENT.set(this);
+  }
+
+  private ServingIndexTiming(ServingIndexTiming parent) {
+    this.parent = parent;
+    this.mode = null;
+    this.from = 0;
+    this.through = 0;
+    this.started = 0;
+  }
+
+  /**
+   * Opens one worker scope on the build thread for a parallel index worker. The worker binds it
+   * with {@link #attach()} and closes it on its own thread; observations release into the
+   * enclosing batch scope and never log or export on their own. Returns null when no batch
+   * scope is open, leaving worker records as silent no-ops.
+   */
+  public static ServingIndexTiming openWorkerScope() {
+    ServingIndexTiming parentScope = CURRENT.get();
+    return parentScope == null ? null : new ServingIndexTiming(parentScope);
+  }
+
+  /** Binds a worker scope to the calling worker thread. */
+  public void attach() {
     CURRENT.set(this);
   }
 
@@ -100,12 +128,29 @@ public final class ServingIndexTiming implements AutoCloseable {
     return calls.getOrDefault(stage, 0L);
   }
 
+  /**
+   * Merges a finished worker scope's stage observations into the batch scope that created it.
+   * Build thread only, after every worker exited; stage times and calls are summed across
+   * workers.
+   */
+  public void releaseToParent() {
+    if (parent != null) {
+      nanos.forEach((stage, value) -> parent.nanos.merge(stage, value, Long::sum));
+      calls.forEach((stage, value) -> parent.calls.merge(stage, value, Long::sum));
+    }
+  }
+
   @Override
   public void close() {
     CURRENT.remove();
+    if (parent != null) {
+      return; // worker scopes release into the batch scope on the build thread
+    }
     long elapsed = System.nanoTime() - started;
     // DIGEST is inside PLAN; TAIL_GET, GROUP, DIRECTORY_GET, DIRECTORY_CODEC and PAGE_ENCODE
-    // are inside BUILD. META_GET may precede BUILD. Do not sum parent and child times.
+    // are inside BUILD. META_GET may precede BUILD. Do not sum parent and child times. Parallel
+    // workers release summed stage observations into this scope, so worker stages may exceed
+    // the BUILD wall time they overlap.
     LOGGER.info("Serving index batch: mode={}, from={}, through={}, success={}, entries={}, "
             + "uniqueKeys={}, writeBytes={}, totalUs={}, stageUs={}, stageCalls={}",
         mode, from, through, success, entries, uniqueKeys, writeBytes, elapsed / 1000,

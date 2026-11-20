@@ -53,6 +53,7 @@ final class ServingIndexStore implements Closeable {
   private final Engine engine;
   private final ArchiveIndexStorage.Writer writer;
   private final boolean initialized;
+  private final ServingIndexParallelAppender appender;
   private final AtomicInteger useAfterClose = new AtomicInteger();
   private volatile Descriptor descriptor;
   private volatile ServingStateRecord state;
@@ -69,6 +70,8 @@ final class ServingIndexStore implements Closeable {
     this.descriptor = descriptor;
     this.state = state;
     this.initialized = initialized;
+    this.appender = new ServingIndexParallelAppender(
+        ServingIndexParallelAppender.resolveParallelism());
   }
 
   /**
@@ -330,10 +333,8 @@ final class ServingIndexStore implements Closeable {
     long grouped = System.nanoTime();
     Map<ExactKey, List<Long>> changeMap = changes(plan);
     ServingIndexTiming.record(ServingIndexTiming.Stage.GROUP, grouped);
-    for (Map.Entry<ExactKey, List<Long>> entry : changeMap.entrySet()) {
-      PersistentServingKeyIndexGeneration.appendExactChanges(writer, batch, entry.getKey(),
-          entry.getValue(), descriptor.indexedThrough());
-    }
+    // Workers only prepare mutations from one durable I; this thread keeps the single write.
+    appender.appendAll(writer, changeMap, batch, descriptor.indexedThrough());
     ServingIndexTiming.record(ServingIndexTiming.Stage.BUILD, started);
     batch.addAll(next.tail);
     write(batch);
@@ -430,7 +431,11 @@ final class ServingIndexStore implements Closeable {
   public void close() throws IOException {
     if (!closed) {
       closed = true;
-      writer.close();
+      try {
+        appender.close();
+      } finally {
+        writer.close();
+      }
     }
   }
 
