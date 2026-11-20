@@ -748,7 +748,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
       for (ServingIndexIncrementalPlan.KeyChange change : database.getValue()) {
-        ExactKey key = new ExactKey(database.getKey(), change.getRawKey());
+        ExactKey key = ExactKey.owned(database.getKey(), change.getRawKey());
         changes.computeIfAbsent(key, ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }
@@ -1960,8 +1960,20 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     private final byte[] rawKey;
 
     ExactKey(String dbName, byte[] rawKey) {
+      this(dbName, rawKey, false);
+    }
+
+    /**
+     * Takes ownership of a caller-private key copy, e.g. the defensive copy returned by
+     * KeyChange.getRawKey(), so grouping copies each changed key once instead of twice.
+     */
+    static ExactKey owned(String dbName, byte[] privateCopy) {
+      return new ExactKey(dbName, privateCopy, true);
+    }
+
+    private ExactKey(String dbName, byte[] rawKey, boolean owned) {
       this.dbName = dbName;
-      this.rawKey = Arrays.copyOf(rawKey, rawKey.length);
+      this.rawKey = owned ? rawKey : Arrays.copyOf(rawKey, rawKey.length);
     }
 
     @Override

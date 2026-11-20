@@ -351,7 +351,7 @@ final class ServingIndexStore implements Closeable {
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
       for (ServingIndexIncrementalPlan.KeyChange change : database.getValue()) {
-        changes.computeIfAbsent(new ExactKey(database.getKey(), change.getRawKey()),
+        changes.computeIfAbsent(ExactKey.owned(database.getKey(), change.getRawKey()),
             ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }

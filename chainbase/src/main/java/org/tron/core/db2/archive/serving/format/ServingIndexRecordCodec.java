@@ -259,7 +259,10 @@ public final class ServingIndexRecordCodec {
    */
   public static final class PageWriter {
     private final int restartInterval;
-    private final ByteArrayOutputStream heightBytes = new ByteArrayOutputStream();
+    // A growable raw buffer instead of ByteArrayOutputStream lets finish() copy the height
+    // bytes exactly once into the final page array, with no intermediate copies.
+    private byte[] heightBytes = new byte[64];
+    private int heightLength;
     private final List<Integer> segmentOffsets = new ArrayList<>();
     private int count;
     private long lastEpoch;
@@ -283,13 +286,15 @@ public final class ServingIndexRecordCodec {
       for (int segment = 0; segment < page.segmentCount; segment++) {
         segmentOffsets.add(offsets[segment]);
       }
-      heightBytes.write(page.payload, page.dataOffset, page.dataLength);
+      heightBytes = new byte[page.dataLength];
+      System.arraycopy(page.payload, page.dataOffset, heightBytes, 0, page.dataLength);
+      heightLength = page.dataLength;
       count = descriptor.entries();
       lastEpoch = descriptor.maxEpoch();
     }
 
     public boolean isFull() {
-      return isPageFull(heightBytes.size());
+      return isPageFull(heightLength);
     }
 
     public void append(long epoch) {
@@ -300,10 +305,10 @@ public final class ServingIndexRecordCodec {
         throw new ArchivePersistenceException("Serving page byte budget is exhausted");
       }
       if (isRestart(count, restartInterval)) {
-        segmentOffsets.add(heightBytes.size());
-        writeUvarint(heightBytes, epoch);
+        segmentOffsets.add(heightLength);
+        putUvarint(epoch);
       } else {
-        writeUvarint(heightBytes, epoch - lastEpoch);
+        putUvarint(epoch - lastEpoch);
       }
       lastEpoch = epoch;
       count++;
@@ -317,15 +322,33 @@ public final class ServingIndexRecordCodec {
       if (count == 0) {
         throw new ArchivePersistenceException("Empty serving page");
       }
-      byte[] encodedHeights = heightBytes.toByteArray();
-      ByteBuffer payload = ByteBuffer.allocate(
-          pageValueBytes(encodedHeights.length, segmentOffsets.size()) - Integer.BYTES);
-      payload.put(COMPRESSED_PAGE).putInt(count).putShort((short) restartInterval)
-          .put(encodedHeights);
+      // One final allocation: header, height bytes, restart offsets, then an in-place CRC32C.
+      byte[] encoded = new byte[pageValueBytes(heightLength, segmentOffsets.size())];
+      ByteBuffer page = ByteBuffer.wrap(encoded);
+      page.put(COMPRESSED_PAGE).putInt(count).putShort((short) restartInterval);
+      System.arraycopy(heightBytes, 0, encoded, page.position(), heightLength);
+      page.position(page.position() + heightLength);
       for (int offset : segmentOffsets) {
-        payload.putShort((short) offset);
+        page.putShort((short) offset);
       }
-      return withChecksum(payload.array());
+      page.putInt(Hashing.crc32c().hashBytes(encoded, 0, page.position()).asInt());
+      return encoded;
+    }
+
+    private void putUvarint(long value) {
+      ensureHeightBytes(9);
+      while ((value & ~0x7fL) != 0) {
+        heightBytes[heightLength++] = (byte) ((value & 0x7f) | 0x80);
+        value >>>= 7;
+      }
+      heightBytes[heightLength++] = (byte) value;
+    }
+
+    private void ensureHeightBytes(int extra) {
+      if (heightLength + extra > heightBytes.length) {
+        heightBytes = Arrays.copyOf(heightBytes,
+            Math.max(heightBytes.length * 2, heightLength + extra));
+      }
     }
   }
 
