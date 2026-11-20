@@ -137,6 +137,22 @@ public class Storage {
 
   @Getter
   @Setter
+  private boolean commonCheckpointPeriodicSync = false;
+
+  @Getter
+  @Setter
+  private int commonCheckpointSyncFlushCount = 100;
+
+  @Getter
+  @Setter
+  private long commonCheckpointSyncEncodedBytes = 0L;
+
+  @Getter
+  @Setter
+  private long commonCheckpointTargetWriteBatchBytes = 0L;
+
+  @Getter
+  @Setter
   private boolean pathStateRootEnabled;
 
   /** Any existing Archive-related configuration enables the coupled AccountAsset lane. */
@@ -158,6 +174,7 @@ public class Storage {
 
   @Getter
   @Setter
+  // Reserved, currently unused: parsed and validated as a future format gate only.
   private int pathStateRootFormatVersion;
 
   @Getter
@@ -170,6 +187,8 @@ public class Storage {
 
   @Getter
   @Setter
+  // Reserved, currently unused: effective write buffer comes from
+  // storage.pathStateRoot.dbSettings profiles, not from this key.
   private long pathStateRootWriteBufferBytes;
 
   @Getter
