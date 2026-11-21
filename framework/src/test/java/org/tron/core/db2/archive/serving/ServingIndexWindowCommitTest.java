@@ -34,8 +34,8 @@ public class ServingIndexWindowCommitTest {
   }
 
   @Test
-  public void maxBlocksOneCommitsEachWindowSeparately() throws Exception {
-    run(new ServingIndexService.Config().setMaxBlocks(1), 3, Arrays.asList(1L, 2L, 3L, 4L, 5L));
+  public void maxBlocksOneAccumulatesIntoOneFlushPerRound() throws Exception {
+    run(new ServingIndexService.Config().setMaxBlocks(1), 3, Arrays.asList(5L));
   }
 
   @Test

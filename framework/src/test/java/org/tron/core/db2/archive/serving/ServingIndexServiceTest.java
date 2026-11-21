@@ -290,7 +290,9 @@ public class ServingIndexServiceTest {
     history.payloadBytes = 300 * 1024;
     history.publish(service, 1, 2);
     assertTrue(awaitThrough(service, 2));
-    assertEquals(2, service.batches(0) + service.batches(1));
+    // The source budget still splits the range into separate read windows; the round now
+    // accumulates them and publishes one flush covering both.
+    assertEquals(1, service.batches(0) + service.batches(1));
     assertNull(service.status().getLastFailure());
     history.assertOracle(service);
   }

@@ -147,10 +147,13 @@ public final class ServingIndexTiming implements AutoCloseable {
       return; // worker scopes release into the batch scope on the build thread
     }
     long elapsed = System.nanoTime() - started;
-    // DIGEST is inside PLAN; TAIL_GET, GROUP, DIRECTORY_GET, DIRECTORY_CODEC and PAGE_ENCODE
-    // are inside BUILD. META_GET may precede BUILD. Do not sum parent and child times. Parallel
-    // workers release summed stage observations into this scope, so worker stages may exceed
-    // the BUILD wall time they overlap.
+    // DIGEST is inside PLAN; TAIL_GET, DIRECTORY_GET, DIRECTORY_CODEC and PAGE_ENCODE are
+    // inside BUILD. META_GET may precede BUILD. Do not sum parent and child times. A streamed
+    // flush writes intent, data batches and the final publish while BUILD is still open, so
+    // BUILD is wall time that overlaps the WRITE_SYNC samples, not a write-free build phase;
+    // GROUP is only recorded by plan-sized commits (accumulation happens outside any scope).
+    // Parallel workers release summed stage observations into this scope, so worker stages
+    // may exceed the BUILD wall time they overlap.
     LOGGER.info("Serving index batch: mode={}, from={}, through={}, success={}, entries={}, "
             + "uniqueKeys={}, writeBytes={}, totalUs={}, stageUs={}, stageCalls={}",
         mode, from, through, success, entries, uniqueKeys, writeBytes, elapsed / 1000,

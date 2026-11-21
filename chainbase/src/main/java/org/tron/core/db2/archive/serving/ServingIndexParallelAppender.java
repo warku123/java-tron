@@ -4,6 +4,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -19,15 +22,22 @@ import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Mutation;
 
 /**
- * Parallel per-key preparation for one serving index commit, Geth-style: distinct keys are
+ * Parallel per-key preparation for one serving index flush, Geth-style: distinct keys are
  * appended concurrently by bounded workers while one key's epochs stay strictly ordered on a
- * single worker. Workers only read the writer and produce per-chunk mutation lists; the build
- * thread still performs the single atomic sync write, so batch order, failure semantics and the
+ * single worker. Workers only read the writer and produce complete per-key mutation groups;
+ * the build thread still performs every write, so batch order, failure semantics and the
  * on-disk format are identical to the serial path.
+ *
+ * <p>Completed chunks stream through {@link ChunkSink} in key order while workers keep
+ * preparing later chunks; a bounded queue caps in-flight mutations. Recovery mode re-checks
+ * each key against a crashed flush: keys still at the old boundary append normally, keys the
+ * interrupted flush already wrote verify against the replayed epochs and are skipped.
  *
  * <p>Parallelism is {@link #THREADS_PROPERTY} (default 1, the serial path) capped at the
  * available processors. The first failure stops dispatching; in-flight workers finish their
- * current key and exit before the failure propagates, so nothing is written on failure.
+ * current key and exit before the failure propagates. In a streamed flush chunks already
+ * delivered to the sink may be durable data batches guarded by the flush intent; recovery
+ * replays and verifies them instead of assuming nothing was written.
  */
 final class ServingIndexParallelAppender implements AutoCloseable {
   private static final Logger LOGGER = LoggerFactory.getLogger(ServingIndexParallelAppender.class);
@@ -35,7 +45,24 @@ final class ServingIndexParallelAppender implements AutoCloseable {
   static final String THREADS_PROPERTY = "tron.archive.serving.buildThreads";
   /** Target chunk count per worker; smaller chunks balance hot and cold keys. */
   private static final int CHUNKS_PER_WORKER = 8;
+  /** Upper bound of keys per chunk, keeping in-flight mutation memory bounded. */
+  private static final int MAX_CHUNK_KEYS = 1024;
   private static final long CLOSE_WAIT_SECONDS = 10;
+
+  /** Receives completed chunks in key order; the sink decides how writes batch. */
+  @FunctionalInterface
+  interface ChunkSink {
+
+    void accept(List<Mutation> chunk) throws IOException;
+  }
+
+  /** Processes one key, returning its complete mutation group (empty when nothing to write). */
+  @FunctionalInterface
+  interface KeyProcessor {
+
+    List<Mutation> process(ArchiveIndexStorage.Writer reader, ExactKey key, long[] epochs)
+        throws IOException;
+  }
 
   private final int parallelism;
   private ExecutorService pool;
@@ -52,40 +79,88 @@ final class ServingIndexParallelAppender implements AutoCloseable {
   }
 
   /**
-   * Appends every grouped key's changes into {@code batch}, in {@code changeMap} iteration
-   * order whatever the worker count. All workers of one call share {@code durableI}, exactly
-   * like the serial loop reading one durable progress value.
+   * Appends every grouped key's changes, in {@code changes} iteration order whatever the worker
+   * count. All workers of one call share {@code durableI}, exactly like the serial loop reading
+   * one durable progress value.
    */
-  void appendAll(ArchiveIndexStorage.Writer reader, Map<ExactKey, List<Long>> changeMap,
-      List<Mutation> batch, long durableI) throws IOException {
-    if (parallelism == 1 || changeMap.size() < 2) {
-      for (Map.Entry<ExactKey, List<Long>> entry : changeMap.entrySet()) {
-        PersistentServingKeyIndexGeneration.appendExactChanges(reader, batch, entry.getKey(),
-            entry.getValue(), durableI);
+  void appendAll(ArchiveIndexStorage.Writer reader, Map<ExactKey, long[]> changes,
+      long durableI, ChunkSink sink) throws IOException {
+    runKeys(reader, changes, (source, key, epochs) -> {
+      List<Mutation> mutations = new ArrayList<>();
+      PersistentServingKeyIndexGeneration.appendExactChanges(source, mutations, key, epochs,
+          durableI);
+      return mutations;
+    }, sink);
+  }
+
+  /**
+   * Recovery counterpart of {@link #appendAll}: a key still at or below {@code baseI} appends
+   * normally; a key the interrupted flush already wrote (last epoch in
+   * {@code (baseI, target]}) must match the replayed epochs exactly and is skipped; anything
+   * beyond {@code target} is corruption.
+   */
+  void recoverAll(ArchiveIndexStorage.Writer reader, Map<ExactKey, long[]> changes,
+      long baseI, long target, ChunkSink sink) throws IOException {
+    runKeys(reader, changes, (source, key, epochs) ->
+        PersistentServingKeyIndexGeneration.recoverExactChanges(source, key, epochs, baseI,
+            target), sink);
+  }
+
+  private void runKeys(ArchiveIndexStorage.Writer reader, Map<ExactKey, long[]> changes,
+      KeyProcessor processor, ChunkSink sink) throws IOException {
+    if (changes.isEmpty()) {
+      return;
+    }
+    List<Map.Entry<ExactKey, long[]>> entries = new ArrayList<>(changes.entrySet());
+    int chunkKeys = Math.max(1, Math.min(entries.size() / (parallelism * CHUNKS_PER_WORKER),
+        MAX_CHUNK_KEYS));
+    int chunkCount = (entries.size() + chunkKeys - 1) / chunkKeys;
+    if (parallelism == 1 || changes.size() < 2) {
+      for (int chunk = 0; chunk < chunkCount; chunk++) {
+        sink.accept(processChunk(reader, processor, entries, chunkKeys, chunk));
       }
       return;
     }
-    appendInParallel(reader, changeMap, batch, durableI);
+    runParallel(reader, processor, entries, chunkKeys, chunkCount, sink);
   }
 
-  private void appendInParallel(ArchiveIndexStorage.Writer reader,
-      Map<ExactKey, List<Long>> changeMap, List<Mutation> batch, long durableI)
+  private void runParallel(ArchiveIndexStorage.Writer reader, KeyProcessor processor,
+      List<Map.Entry<ExactKey, long[]>> entries, int chunkKeys, int chunkCount, ChunkSink sink)
       throws IOException {
-    List<Map.Entry<ExactKey, List<Long>>> entries = new ArrayList<>(changeMap.entrySet());
-    int chunkSize = Math.max(1, entries.size() / (parallelism * CHUNKS_PER_WORKER));
-    int chunkCount = (entries.size() + chunkSize - 1) / chunkSize;
-    @SuppressWarnings("unchecked")
-    List<Mutation>[] chunks = new List[chunkCount];
     AtomicInteger nextChunk = new AtomicInteger();
     AtomicReference<Throwable> failure = new AtomicReference<>();
     ExecutorService workers = pool();
     int workerCount = Math.min(parallelism, chunkCount);
+    BlockingQueue<Object> completed = new ArrayBlockingQueue<>(workerCount * 2);
     List<Future<ServingIndexTiming>> futures = new ArrayList<>(workerCount);
     try {
       for (int worker = 0; worker < workerCount; worker++) {
         ServingIndexTiming scope = ServingIndexTiming.openWorkerScope();
         futures.add(workers.submit(() ->
-            runWorker(reader, entries, chunkSize, chunks, nextChunk, failure, durableI, scope)));
+            runWorker(reader, processor, entries, chunkKeys, chunkCount, nextChunk, failure,
+                completed, scope)));
+      }
+      // Re-emit completed chunks in key order; the bounded queue caps buffered reorders.
+      // Poll with a failure check: producers drop work once a failure is recorded, so the
+      // consumer must never block indefinitely on a queue nobody feeds anymore.
+      TreeMap<Integer, List<Mutation>> pending = new TreeMap<>();
+      int emitted = 0;
+      while (emitted < chunkCount && failure.get() == null) {
+        Object taken = pollCompleted(completed);
+        if (Thread.currentThread().isInterrupted()) {
+          failure.compareAndSet(null, new InterruptedException());
+          break;
+        }
+        if (!(taken instanceof IndexedChunk)) {
+          continue; // poison or timeout: a worker exited or is still preparing
+        }
+        IndexedChunk chunk = (IndexedChunk) taken;
+        pending.put(chunk.index, chunk.mutations);
+        for (List<Mutation> ready = pending.remove(emitted); ready != null;
+            ready = pending.remove(emitted)) {
+          sink.accept(ready);
+          emitted++;
+        }
       }
       for (Future<ServingIndexTiming> future : futures) {
         future.get();
@@ -95,6 +170,9 @@ final class ServingIndexParallelAppender implements AutoCloseable {
       failure.compareAndSet(null, submitFailure.getCause());
     } catch (InterruptedException interrupted) {
       failure.compareAndSet(null, interrupted);
+    } catch (IOException | RuntimeException sinkFailure) {
+      // The sink aborted the flush; record it so workers stop and exit before propagating.
+      failure.compareAndSet(null, sinkFailure);
     }
     if (awaitTerminated(futures)) {
       Thread.currentThread().interrupt();
@@ -110,30 +188,21 @@ final class ServingIndexParallelAppender implements AutoCloseable {
       rethrow(cause);
       return;
     }
-    for (List<Mutation> chunk : chunks) {
-      batch.addAll(chunk);
-    }
   }
 
   /** Processes chunks until none remain or a failure is recorded; never throws. */
-  private ServingIndexTiming runWorker(ArchiveIndexStorage.Writer reader,
-      List<Map.Entry<ExactKey, List<Long>>> entries, int chunkSize, List<Mutation>[] chunks,
-      AtomicInteger nextChunk, AtomicReference<Throwable> failure, long durableI,
+  private ServingIndexTiming runWorker(ArchiveIndexStorage.Writer reader, KeyProcessor processor,
+      List<Map.Entry<ExactKey, long[]>> entries, int chunkKeys, int chunkCount,
+      AtomicInteger nextChunk, AtomicReference<Throwable> failure, BlockingQueue<Object> completed,
       ServingIndexTiming scope) {
     if (scope != null) {
       scope.attach();
     }
     try {
-      for (int chunk = nextChunk.getAndIncrement(); chunk < chunks.length
+      for (int chunk = nextChunk.getAndIncrement(); chunk < chunkCount
           && failure.get() == null; chunk = nextChunk.getAndIncrement()) {
-        List<Mutation> mutations = new ArrayList<>();
-        int last = Math.min(entries.size(), (chunk + 1) * chunkSize);
-        for (int index = chunk * chunkSize; index < last; index++) {
-          Map.Entry<ExactKey, List<Long>> entry = entries.get(index);
-          PersistentServingKeyIndexGeneration.appendExactChanges(reader, mutations,
-              entry.getKey(), entry.getValue(), durableI);
-        }
-        chunks[chunk] = mutations;
+        List<Mutation> mutations = processChunk(reader, processor, entries, chunkKeys, chunk);
+        put(completed, new IndexedChunk(chunk, mutations), failure);
       }
     } catch (IOException | RuntimeException | Error workerFailure) {
       failure.compareAndSet(null, workerFailure);
@@ -141,8 +210,58 @@ final class ServingIndexParallelAppender implements AutoCloseable {
       if (scope != null) {
         scope.close();
       }
+      put(completed, POISON, failure);
     }
     return scope;
+  }
+
+  private List<Mutation> processChunk(ArchiveIndexStorage.Writer reader, KeyProcessor processor,
+      List<Map.Entry<ExactKey, long[]>> entries, int chunkKeys, int chunk) throws IOException {
+    List<Mutation> mutations = new ArrayList<>();
+    int last = Math.min(entries.size(), (chunk + 1) * chunkKeys);
+    for (int index = chunk * chunkKeys; index < last; index++) {
+      Map.Entry<ExactKey, long[]> entry = entries.get(index);
+      mutations.addAll(processor.process(reader, entry.getKey(), entry.getValue()));
+    }
+    return mutations;
+  }
+
+  private static final Object POISON = new Object();
+
+  private static final class IndexedChunk {
+    private final int index;
+    private final List<Mutation> mutations;
+
+    private IndexedChunk(int index, List<Mutation> mutations) {
+      this.index = index;
+      this.mutations = mutations;
+    }
+  }
+
+  private static void put(BlockingQueue<Object> completed, Object item,
+      AtomicReference<Throwable> failure) {
+    try {
+      // Offer with a failure check: once a failure is recorded the consumer stops draining,
+      // so a blocking put here would wedge the worker and hang every future.get().
+      while (!completed.offer(item, 100, TimeUnit.MILLISECONDS)) {
+        if (failure.get() != null) {
+          return; // drop the item; the flush fails anyway
+        }
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      failure.compareAndSet(null, interrupted);
+    }
+  }
+
+  /** Takes one completion, timing out so the caller can re-check the failure flag. */
+  private static Object pollCompleted(BlockingQueue<Object> completed) {
+    try {
+      return completed.poll(100, TimeUnit.MILLISECONDS);
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      return POISON;
+    }
   }
 
   /** Waits for every worker to exit (they stop after their current key once failure is set). */

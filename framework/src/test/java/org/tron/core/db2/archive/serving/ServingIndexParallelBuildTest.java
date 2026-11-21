@@ -82,14 +82,14 @@ public class ServingIndexParallelBuildTest {
       seeded = dumpRows(store);
       second = plan(store, blocks(21, 2, 8));
     }
-    Map<ExactKey, List<Long>> changeMap = changes(second);
+    Map<ExactKey, long[]> changeMap = changes(second);
     assertEquals(8, changeMap.size());
 
     StubWriter serial = new StubWriter(seeded);
     List<Mutation> serialBatch = new ArrayList<>();
     try (ServingIndexParallelAppender serialAppender = new ServingIndexParallelAppender(1);
         ServingIndexTiming timing = new ServingIndexTiming("appender-serial", 21, 22)) {
-      serialAppender.appendAll(serial, changeMap, serialBatch, Long.MAX_VALUE);
+      serialAppender.appendAll(serial, changeMap, Long.MAX_VALUE, serialBatch::addAll);
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.META_GET));
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.DIRECTORY_GET));
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.TAIL_GET));
@@ -106,7 +106,7 @@ public class ServingIndexParallelBuildTest {
     long started = System.nanoTime();
     try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(4);
         ServingIndexTiming timing = new ServingIndexTiming("appender-parallel", 21, 22)) {
-      appender.appendAll(parallel, changeMap, parallelBatch, Long.MAX_VALUE);
+      appender.appendAll(parallel, changeMap, Long.MAX_VALUE, parallelBatch::addAll);
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.META_GET));
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.DIRECTORY_GET));
       assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.TAIL_GET));
@@ -131,7 +131,7 @@ public class ServingIndexParallelBuildTest {
         1, hash(0), false, 1)) {
       window = plan(store, blocks(1, 3, 8));
     }
-    Map<ExactKey, List<Long>> changeMap = changes(window);
+    Map<ExactKey, long[]> changeMap = changes(window);
 
     StubWriter stub = new StubWriter();
     stub.parkFor(metaKeyHex(3), 3000);
@@ -140,7 +140,7 @@ public class ServingIndexParallelBuildTest {
     long started = System.nanoTime();
     try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(4)) {
       try {
-        appender.appendAll(stub, changeMap, batch, Long.MAX_VALUE);
+        appender.appendAll(stub, changeMap, Long.MAX_VALUE, batch::addAll);
         fail("expected the worker failure to propagate");
       } catch (IllegalStateException expected) {
         assertEquals("boom", expected.getMessage());
@@ -149,11 +149,16 @@ public class ServingIndexParallelBuildTest {
       // that read to leave the database before propagating the failure.
       assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) >= 2500);
       assertTrue(stub.writes.isEmpty());
-      assertTrue(batch.isEmpty());
+      // Chunks delivered before the failure may already be in the sink; that is the streamed
+      // flush contract (the durable-write gate plus recovery own their cleanup). The stub
+      // never wrote anything, and the delivered prefix only contains complete key groups.
+      for (Mutation mutation : batch) {
+        assertTrue(mutation.estimatedBytes() > 0);
+      }
       // The pool survives a failed window.
       StubWriter clean = new StubWriter();
       List<Mutation> retry = new ArrayList<>();
-      appender.appendAll(clean, changeMap, retry, Long.MAX_VALUE);
+      appender.appendAll(clean, changeMap, Long.MAX_VALUE, retry::addAll);
       assertEquals(8, retry.size());
       assertTrue(clean.writes.isEmpty());
     }
@@ -217,16 +222,24 @@ public class ServingIndexParallelBuildTest {
     }
   }
 
-  /** The same grouping ServingIndexStore.changes applies before dispatching workers. */
-  private static Map<ExactKey, List<Long>> changes(ServingIndexIncrementalPlan plan) {
-    Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
+  /** The same grouping ServingIndexStore applies before dispatching workers. */
+  private static Map<ExactKey, long[]> changes(ServingIndexIncrementalPlan plan) {
+    Map<ExactKey, List<Long>> grouped = new LinkedHashMap<>();
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
       for (ServingIndexIncrementalPlan.KeyChange change : database.getValue()) {
-        changes.computeIfAbsent(ExactKey.owned(database.getKey(), change.getRawKey()),
+        grouped.computeIfAbsent(ExactKey.owned(database.getKey(), change.getRawKey()),
             ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }
+    Map<ExactKey, long[]> changes = new LinkedHashMap<>();
+    grouped.forEach((key, epochs) -> {
+      long[] values = new long[epochs.size()];
+      for (int index = 0; index < values.length; index++) {
+        values[index] = epochs.get(index);
+      }
+      changes.put(key, values);
+    });
     return changes;
   }
 

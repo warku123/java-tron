@@ -92,11 +92,17 @@ KeyMeta 与描述符（Geth 同样信任 desc），旧页内容校验由 CRC、�
 整条重编码写回（定长描述符复制，无变长重算）。
 
 默认每次从 History 读取最多 1000 块，按 32 MiB 选择读取窗口；第一块即使超出也会读取。
-选中的窗口整体构建为一次提交：窗口内不再按写入估算切批，估算阈值（60 MiB／450,000 次
-mutation）已删除，也不读索引库预估写入量；来多少块就一次原子提交多少块。
-与 Geth 对齐的是「按已解码的变更构建索引、不按 key 长度猜输出」这一点；
-Geth 内部按 8M 条真实变更和已构建 batch 的实际大小分次落盘，那一层不照搬，
-因为索引数据、coverage 和进度必须同批原子发布。
+读取窗口只约束输入：窗口内的完整块按 Geth `batchIndexer` 的形态累计进一张跨窗口的
+`(store, rawKey) → 有序高度` 内存表（真实变更条数计 `pending`），到达变更条数阈值
+（`flushChanges`，默认 8M，对齐 Geth `historyIndexBatch`）或本轮追赶目标即封存落盘；
+块边界不再单独发布进度。与 Geth 对齐的是「按已解码的变更构建索引、不按 key 长度
+猜输出、一个热 key 的一次 flush 只打开一次」；Geth 内部按 8M 条真实变更和已构建
+batch 的实际大小分次落盘，我们的分批写按已编码 mutation 字节（`dataBatchBytes`）切分
+key 原子子批：整体不超预算的 flush 仍是一次原子写；超过时先写一条 flush intent，
+再写各数据子批，最后一个同步批发布 coverage 与进度并删除 intent。中断后重开时按
+intent 从 History 重放同一区间：仍处旧进度的 key 正常追加，已写完的 key 与重放结果
+逐高度核验一致后跳过，恢复自身可再次中断并幂等重试；查询始终以旧 I 为上界
+（覆盖守卫在读取页之前拒绝超出 I 的查询）。
 
 正式提交按聚合后的 key 读取 KeyMeta，分页 key 再读目录和尾页。分组后的 key 可由有界
 worker 并行准备（`tron.archive.serving.buildThreads`，默认 1 即原串行路径）：worker 只读

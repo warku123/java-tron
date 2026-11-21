@@ -1166,7 +1166,13 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   static void appendExactChanges(ArchiveIndexStorage.Writer target,
       List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
       List<Long> suppliedEpochs, long durableI) throws IOException {
-    List<Long> appended = suppliedEpochs;
+    appendExactChanges(target, batch, key, toArray(suppliedEpochs), durableI);
+  }
+
+  static void appendExactChanges(ArchiveIndexStorage.Writer target,
+      List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
+      long[] suppliedEpochs, long durableI) throws IOException {
+    int offset = 0;
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
     byte[] existing;
     long started = System.nanoTime();
@@ -1178,21 +1184,23 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
     List<ServingIndexRecordCodec.PageDescriptor> pages = null;
     if (meta != null && meta.lastEpoch > durableI) {
-      if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1 || appended.isEmpty()
-          || appended.get(0) != durableI + 1) {
+      if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1
+          || suppliedEpochs.length == 0 || suppliedEpochs[0] != durableI + 1) {
         throw new ArchivePersistenceException(
             "Serving R-IDEM violated: KeyMeta last epoch is ahead of durable progress");
       }
       if (meta.mode == PAGED_DIRECTORY) {
         pages = readDirectory(target, key, meta);
       }
-      appended = appended.subList(1, appended.size());
+      offset = 1;
     }
-    if (appended.isEmpty()) {
+    if (offset >= suppliedEpochs.length) {
       return;
     }
-    requireStrictEpochs(appended, meta == null ? Long.MIN_VALUE : meta.lastEpoch);
-    long count = (meta == null ? 0 : meta.count) + appended.size();
+    requireStrictEpochs(suppliedEpochs, offset,
+        meta == null ? Long.MIN_VALUE : meta.lastEpoch);
+    int appended = suppliedEpochs.length - offset;
+    long count = (meta == null ? 0 : meta.count) + appended;
     byte[] encodedTail = null;
     if (meta != null && meta.mode != INLINE) {
       if (pages == null) {
@@ -1207,19 +1215,136 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       }
     } else {
       if (meta != null) {
-        List<Long> combined = asList(meta.inlineEpochs);
-        combined.addAll(appended);
-        appended = combined;
+        long[] combined = new long[meta.inlineEpochs.length + appended];
+        System.arraycopy(meta.inlineEpochs, 0, combined, 0, meta.inlineEpochs.length);
+        System.arraycopy(suppliedEpochs, offset, combined, meta.inlineEpochs.length, appended);
+        suppliedEpochs = combined;
+        offset = 0;
       }
       if (count <= INLINE_EPOCH_LIMIT) {
-        batch.add(ArchiveIndexStorage.put(metaKey, encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
+        batch.add(ArchiveIndexStorage.put(metaKey, encodeKeyMeta(KeyMeta.inline(
+            Arrays.copyOfRange(suppliedEpochs, offset, suppliedEpochs.length)))));
         return;
       }
       pages = new ArrayList<>();
     }
-    writePagedChanges(batch, key, appended, encodedTail, pages);
+    writePagedChanges(batch, key, suppliedEpochs, offset, encodedTail, pages);
     batch.add(ArchiveIndexStorage.put(metaKey, encodeKeyMeta(KeyMeta.paged(count,
-        meta == null ? appended.get(0) : meta.firstEpoch, appended.get(appended.size() - 1)))));
+        meta == null ? suppliedEpochs[offset] : meta.firstEpoch,
+        suppliedEpochs[suppliedEpochs.length - 1]))));
+  }
+
+  /**
+   * Crash recovery for one key of an interrupted multi-batch flush, which wrote whole
+   * key-atomic data batches before the final progress publish: the durable state either still
+   * sits at or below {@code baseI} (append the replayed epochs normally) or already carries
+   * exactly the replayed epochs of {@code (baseI, target]} (verify the suffix and skip).
+   * Anything ahead of {@code target} or differing from the replay is corruption.
+   */
+  static List<ArchiveIndexStorage.Mutation> recoverExactChanges(
+      ArchiveIndexStorage.Writer target, ExactKey key, long[] epochs, long baseI,
+      long targetThrough) throws IOException {
+    byte[] existing;
+    long started = System.nanoTime();
+    try {
+      existing = target.get(keyMetaKey(key.dbName, key.rawKey));
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
+    }
+    KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
+    // lastEpoch == baseI + 1 is either this flush's already-written single-epoch group
+    // (R-IDEM drops it and nothing remains to append) or the legacy solo residue of an
+    // earlier version that R-IDEM also absorbs; both must recover, never report corruption.
+    if (meta == null || meta.lastEpoch <= baseI || meta.lastEpoch == baseI + 1) {
+      List<ArchiveIndexStorage.Mutation> mutations = new ArrayList<>();
+      appendExactChanges(target, mutations, key, epochs, baseI);
+      return mutations;
+    }
+    if (meta.lastEpoch > targetThrough) {
+      throw new ArchivePersistenceException(
+          "Serving flush residue is ahead of the interrupted flush target");
+    }
+    verifyFlushResidue(target, key, meta, epochs, baseI);
+    return new ArrayList<>();
+  }
+
+  /** The last {@code expected.length} durable epochs must equal the replay and start above I. */
+  private static void verifyFlushResidue(ArchiveIndexStorage.Writer target, ExactKey key,
+      KeyMeta meta, long[] expected, long baseI) throws IOException {
+    if (meta.count < expected.length) {
+      throw residueCorrupt();
+    }
+    if (meta.mode == INLINE) {
+      verifyResidueSuffix(meta.inlineEpochs, meta.inlineEpochs.length - expected.length,
+          expected, baseI, null);
+      return;
+    }
+    if (meta.mode != PAGED_DIRECTORY) {
+      throw new ArchivePersistenceException("Unknown serving key metadata mode");
+    }
+    List<ServingIndexRecordCodec.PageDescriptor> pages = readDirectory(target, key, meta);
+    // The suffix spans whole trailing pages; find the first page it touches.
+    int startPage = pages.size() - 1;
+    long tailEntries = 0;
+    while (startPage >= 0) {
+      tailEntries += pages.get(startPage).entries();
+      if (tailEntries >= expected.length) {
+        break;
+      }
+      startPage--;
+    }
+    if (startPage < 0) {
+      throw residueCorrupt();
+    }
+    long[] region = new long[(int) tailEntries];
+    int filled = 0;
+    for (int page = startPage; page < pages.size(); page++) {
+      long started = System.nanoTime();
+      byte[] encoded;
+      try {
+        encoded = target.get(keyPageKey(key.dbName, key.rawKey, pages.get(page).pageId()));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, started);
+      }
+      if (encoded == null) {
+        throw new ArchivePersistenceException("Exact serving epoch page is missing");
+      }
+      long[] epochs = decodeEpochPage(encoded);
+      if (filled + epochs.length > region.length) {
+        throw residueCorrupt();
+      }
+      System.arraycopy(epochs, 0, region, filled, epochs.length);
+      filled += epochs.length;
+    }
+    verifyResidueSuffix(region, region.length - expected.length, expected, baseI,
+        startPage > 0 ? pages.get(startPage - 1).maxEpoch() : null);
+  }
+
+  private static void verifyResidueSuffix(long[] region, int offset, long[] expected,
+      long baseI, Long precedingMaxEpoch) {
+    if (offset < 0) {
+      throw residueCorrupt();
+    }
+    // Mixed long/Long ternaries unbox both branches; keep the null predecessor explicit.
+    Long predecessor;
+    if (offset > 0) {
+      predecessor = region[offset - 1];
+    } else {
+      predecessor = precedingMaxEpoch;
+    }
+    if (predecessor != null && predecessor > baseI) {
+      throw residueCorrupt();
+    }
+    for (int index = 0; index < expected.length; index++) {
+      if (region[offset + index] != expected[index]) {
+        throw residueCorrupt();
+      }
+    }
+  }
+
+  private static ArchivePersistenceException residueCorrupt() {
+    return new ArchivePersistenceException(
+        "Serving flush residue differs from the replayed batch");
   }
 
   private static List<ServingIndexRecordCodec.PageDescriptor> readDirectory(
@@ -1246,7 +1371,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
    * and is never rewritten here.
    */
   private static void writePagedChanges(List<ArchiveIndexStorage.Mutation> batch,
-      ExactKey key, List<Long> epochs, byte[] encodedTail,
+      ExactKey key, long[] epochs, int offset, byte[] encodedTail,
       List<ServingIndexRecordCodec.PageDescriptor> pages) {
     byte[] directoryKey = ServingIndexKeyCodec.keyPageDirectoryKey(key.dbName, key.rawKey);
     long started = System.nanoTime();
@@ -1265,13 +1390,13 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
         writer = new ServingIndexRecordCodec.PageWriter();
       }
     }
-    for (long epoch : epochs) {
+    for (int index = offset; index < epochs.length; index++) {
       if (writer.isFull()) {
         emitPage(batch, key, writer, pageId, pages);
         pageId = requireNextPageId(pageId);
         writer = new ServingIndexRecordCodec.PageWriter();
       }
-      writer.append(epoch);
+      writer.append(epochs[index]);
     }
     emitPage(batch, key, writer, pageId, pages);
     ServingIndexTiming.record(ServingIndexTiming.Stage.PAGE_ENCODE, started);
@@ -1354,6 +1479,16 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
 
   private static void requireStrictEpochs(List<Long> epochs, long previous) {
     ServingIndexRecordCodec.requireStrictEpochs(epochs, previous);
+  }
+
+  private static void requireStrictEpochs(long[] epochs, int from, long previous) {
+    for (int index = from; index < epochs.length; index++) {
+      long epoch = epochs[index];
+      if (epoch < 0 || epoch <= previous) {
+        throw new ArchivePersistenceException("Serving epochs are not strictly increasing");
+      }
+      previous = epoch;
+    }
   }
 
   private static long[] toArray(List<Long> epochs) {

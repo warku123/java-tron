@@ -51,8 +51,11 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  *       Receipt failure blocks further admission but never undoes committed History.</li>
  *   <li>Merged watermark (S2): the work range is always {@code (I, W]} of the published History
  *       boundary; notifications only wake the thread.</li>
- *   <li>One commit per selected History read window, oversized block included. Data and
- *       progress always share one atomic write.</li>
+ *   <li>Geth-style accumulation (batchIndexer): bounded History windows feed one in-memory
+ *       change table per round; a flush triggers on the real-change threshold or at the round
+ *       target. A flush fitting one batch stays atomic; larger flushes write a durable intent,
+ *       key-atomic data batches, then publish coverage and progress in the final write, and an
+ *       interrupted flush recovers by replaying History against the intent.</li>
  *   <li>Readiness (S5, S-INV-8): the initial state is derived from durable data; LIVE is entered
  *       when a commit reaches {@code I == W} and left when {@code W - I > live.maxLagBlocks}. No
  *       block-import call, no P2P signal.</li>
@@ -214,6 +217,9 @@ public final class ServingIndexService implements AutoCloseable {
 
   // Build-thread state.
   private ServingIndexStore store;
+  /** In-memory changes of the round being accumulated; null between rounds (Geth batchIndexer). */
+  private ServingChangeAccumulator accumulator;
+  private long roundTarget = -1;
 
   private long handleSeq;
   private ServingState state = ServingState.OPENING;
@@ -507,6 +513,7 @@ public final class ServingIndexService implements AutoCloseable {
         throw new ServingFaultException(Reason.IDENTITY,
             "Serving hash(I) differs from History at " + i);
       }
+      recoverPendingFlush(opened, history, w);
     } catch (IOException | RuntimeException failure) {
       try {
         opened.close();
@@ -534,6 +541,50 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   /**
+   * Replays the pending flush intent from History and completes it: keys the interrupted flush
+   * already wrote verify against the replay and are skipped, the rest append, then the final
+   * publish batch installs progress and deletes the intent. The replay may itself be
+   * interrupted and repeats idempotently on the next open.
+   */
+  private void recoverPendingFlush(ServingIndexStore opened, Committed history, long w)
+      throws IOException {
+    ServingIndexStore.FlushIntent intent = opened.pendingFlushIntent();
+    if (intent == null) {
+      return;
+    }
+    if (intent.targetThrough() > w) {
+      throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
+          "Serving flush intent target " + intent.targetThrough() + " is beyond History W=" + w);
+    }
+    logger.info("Recovering interrupted serving flush: from={}, through={}",
+        intent.baseThrough() + 1, intent.targetThrough());
+    ServingChangeAccumulator replay = new ServingChangeAccumulator(opened.indexedThrough(),
+        opened.headHash(), opened.sourceDigest(), opened.latestIdentityDigest(),
+        opened.participantsList());
+    while (replay.readThrough() < intent.targetThrough()) {
+      ServingBatchPlanner.Selection selection = planner.select(source, history,
+          replay.readThrough(), intent.targetThrough());
+      if (selection == null) {
+        throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
+            "History cannot serve the serving flush recovery range");
+      }
+      for (CommittedBlock block
+          : source.read(history, selection.getFirst(), selection.getLast())) {
+        replay.addBlock(block.getDiff(), block.getStepDigest());
+      }
+    }
+    ServingChangeAccumulator.Sealed sealed = replay.seal();
+    if (sealed.indexedThrough() != intent.targetThrough()
+        || !Arrays.equals(sealed.headHash(), intent.targetHash())
+        || !Arrays.equals(sealed.sourceDigest(), intent.targetSourceDigest())
+        || sealed.keyChanges() != intent.keyChanges()) {
+      throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
+          "Serving flush recovery replay differs from the durable intent");
+    }
+    opened.recoverFlush(sealed.toAppend(), intent, config.getDataBatchBytes());
+  }
+
+  /**
    * One build round. Returns how long to wait before the next round (0 = run again now).
    */
   private long step() throws IOException {
@@ -549,7 +600,7 @@ public final class ServingIndexService implements AutoCloseable {
       throw new ServingFaultException(Reason.INDEX_AHEAD, "Serving I is ahead of History W");
     }
     long now = clock.getAsLong();
-    if (i == w) {
+    if (accumulator == null && i == w) {
       pendingSinceMillis = 0;
       backlogObservedSinceMillis = 0;
       if (state == ServingState.REBUILDING) {
@@ -563,26 +614,81 @@ public final class ServingIndexService implements AutoCloseable {
       }
       return config.getPollMillis();
     }
-    if (backlogObservedSinceMillis == 0) {
-      backlogObservedSinceMillis = now;
-    }
-    if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
-      transition(ServingState.BULK_CATCH_UP, w);
-    }
-    if (!fastCatchUpRequested.get()
-        && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
-        && config.getTailDelayMillis() > 0 && w - i < config.getBulkMinBlocks()) {
-      if (pendingSinceMillis == 0) {
-        pendingSinceMillis = now;
+    if (accumulator == null) {
+      if (backlogObservedSinceMillis == 0) {
+        backlogObservedSinceMillis = now;
       }
-      long remaining = pendingSinceMillis + config.getTailDelayMillis() - now;
-      if (remaining > 0) {
-        publish();
-        return remaining;
+      if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
+        transition(ServingState.BULK_CATCH_UP, w);
       }
+      if (!fastCatchUpRequested.get()
+          && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
+          && config.getTailDelayMillis() > 0 && w - i < config.getBulkMinBlocks()) {
+        if (pendingSinceMillis == 0) {
+          pendingSinceMillis = now;
+        }
+        long remaining = pendingSinceMillis + config.getTailDelayMillis() - now;
+        if (remaining > 0) {
+          publish();
+          return remaining;
+        }
+      }
+      // Geth-style round: read bounded windows toward a fixed target and flush once the
+      // real-change threshold is reached or the target is consumed; a window boundary alone
+      // no longer publishes progress.
+      accumulator = new ServingChangeAccumulator(i, store.headHash(), store.sourceDigest(),
+          store.latestIdentityDigest(), store.participantsList());
+      roundTarget = w;
     }
-    ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
-    buildRange(history, selection.getFirst(), selection.getLast(), w);
+    if (accumulator.readThrough() >= roundTarget) {
+      flushRound(w);
+      return 0;
+    }
+    ServingBatchPlanner.Selection selection = planner.select(source, history,
+        accumulator.readThrough(), roundTarget);
+    if (selection == null) {
+      throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
+          "History cannot serve the serving read range");
+    }
+    consumeWindow(history, selection);
+    if (accumulator.pendingChanges() >= config.getFlushChanges()
+        || accumulator.readThrough() >= roundTarget) {
+      flushRound(w);
+      return 0;
+    }
+    publish();
+    return 0;
+  }
+
+  private void consumeWindow(Committed history, ServingBatchPlanner.Selection selection)
+      throws IOException {
+    hooks.beforeBatch(selection.getFirst(), selection.getLast(), false);
+    List<CommittedBlock> blocks = source.read(history, selection.getFirst(), selection.getLast());
+    for (CommittedBlock block : blocks) {
+      accumulator.addBlock(block.getDiff(), block.getStepDigest());
+    }
+    requireOpen();
+  }
+
+  /** One sealed accumulation through the single durable commit path, then the tail checks. */
+  private void flushRound(long w) throws IOException {
+    ServingChangeAccumulator.Sealed sealed = accumulator.seal();
+    accumulator = null;
+    roundTarget = -1;
+    boolean split = sealed.indexedThrough() < w;
+    long started = System.nanoTime();
+    try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
+        sealed.indexedFrom(), sealed.indexedThrough())) {
+      store.commit(sealed.toAppend(), sealed.indexedThrough() == w,
+          config.getDataBatchBytes());
+      timing.succeeded();
+    }
+    hooks.afterCommit(sealed.indexedFrom() + 1, sealed.indexedThrough());
+    batchCounters[split ? 1 : 0]++;
+    ServingIndexTiming.batch(split ? "split" : "normal");
+    logger.info("Serving index batch: state={}, from={}, through={}, changes={}, durationMs={}",
+        state, sealed.indexedFrom(), sealed.indexedThrough(), sealed.keyChanges(),
+        (System.nanoTime() - started) / 1_000_000L);
     if (store.indexedThrough() == w) {
       pendingSinceMillis = 0;
       backlogObservedSinceMillis = 0;
@@ -592,42 +698,9 @@ public final class ServingIndexService implements AutoCloseable {
       }
       if (state != ServingState.LIVE) {
         transition(ServingState.LIVE, w);
-        return 0;
       }
     }
     publish();
-    return 0;
-  }
-
-  private void buildRange(Committed history, long first, long last, long w)
-      throws IOException {
-    hooks.beforeBatch(first, last, false);
-    List<CommittedBlock> blocks = source.read(history, first, last);
-    ServingIndexIncrementalPlan.Builder builder = new ServingIndexIncrementalPlan.Builder(
-        store.indexedThrough(), store.headHash());
-    for (CommittedBlock block : blocks) {
-      builder.add(block.getDiff(), block.getStepDigest());
-    }
-    requireOpen();
-    ServingIndexIncrementalPlan plan = builder.build();
-    // A window short of W is one catch-up batch among several; never a partial write.
-    boolean split = plan.getIndexedThrough() < w;
-    long started = System.nanoTime();
-    try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
-        plan.getIndexedFrom(), plan.getIndexedThrough())) {
-      store.commit(plan, plan.getIndexedThrough() == w);
-      timing.succeeded();
-    }
-    hooks.afterCommit(plan.getIndexedFrom() + 1, plan.getIndexedThrough());
-    batchCounters[split ? 1 : 0]++;
-    ServingIndexTiming.batch(split ? "split" : "normal");
-    logBatch(plan, blocks.size(), started);
-  }
-
-  private void logBatch(ServingIndexIncrementalPlan plan, int blocks, long started) {
-    logger.info("Serving index batch: state={}, from={}, through={}, blocks={}, durationMs={}",
-        state, plan.getIndexedFrom(), plan.getIndexedThrough(), blocks,
-        (System.nanoTime() - started) / 1_000_000L);
   }
 
   /** DEGRADED: returns true when it acted, false when the caller should wait. */
@@ -891,6 +964,8 @@ public final class ServingIndexService implements AutoCloseable {
   private void closeStoreQuietly() {
     ServingIndexStore handle = store;
     store = null;
+    accumulator = null;
+    roundTarget = -1;
     if (handle != null) {
       try {
         handle.close();
@@ -1033,6 +1108,10 @@ public final class ServingIndexService implements AutoCloseable {
   public static final class Config {
     private int maxBlocks = 1000;
     private long maxSourceBytes = 32L * 1024 * 1024;
+    /** Real changes accumulated across windows before one flush, Geth's historyIndexBatch. */
+    private long flushChanges = 8L * 1024 * 1024;
+    /** Encoded mutation bytes above which a flush streams key-atomic data batches. */
+    private long dataBatchBytes = 32L * 1024 * 1024;
     private long tailDelayMillis;
     private long bulkMinBlocks = 1000;
     private long liveMaxLagBlocks = 100;
@@ -1074,6 +1153,8 @@ public final class ServingIndexService implements AutoCloseable {
         throw new IllegalArgumentException("serving.bulk.tailDelayMillis must be in [0, 60000]");
       }
       requirePositive(bulkMinBlocks, "bulk.minBlocks");
+      requirePositive(flushChanges, "batch.flushChanges");
+      requirePositive(dataBatchBytes, "batch.dataBatchBytes");
       requirePositive(liveMaxLagBlocks, "live.maxLagBlocks");
       requirePositive(retryInitialBackoffMillis, "retry.initialBackoffMillis");
       requirePositive(retryMaxBackoffMillis, "retry.maxBackoffMillis");
@@ -1102,6 +1183,24 @@ public final class ServingIndexService implements AutoCloseable {
 
     public long getMaxSourceBytes() {
       return maxSourceBytes;
+    }
+
+    public long getFlushChanges() {
+      return flushChanges;
+    }
+
+    public Config setFlushChanges(long value) {
+      flushChanges = value;
+      return this;
+    }
+
+    public long getDataBatchBytes() {
+      return dataBatchBytes;
+    }
+
+    public Config setDataBatchBytes(long value) {
+      dataBatchBytes = value;
+      return this;
     }
 
     public Config setMaxSourceBytes(long value) {
