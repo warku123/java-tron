@@ -541,7 +541,9 @@ final class ServingIndexStore implements Closeable {
    * Batches prepared key groups into writes. A flush fitting {@code batchBytes} keeps data,
    * coverage and progress in one atomic write, exactly like a plan-sized commit. A larger
    * flush first writes a durable intent, then key-atomic data batches, and publishes coverage
-   * and progress in the final write that also deletes the intent.
+   * and progress in the final write that also deletes the intent. Groups arrive in worker
+   * completion order; a group's mutations always share one write batch, so the order between
+   * distinct keys never matters.
    */
   private final class FlushFlow implements ServingIndexParallelAppender.ChunkSink {
     private final GroupedAppend append;
@@ -566,20 +568,20 @@ final class ServingIndexStore implements Closeable {
     }
 
     @Override
-    public void accept(List<Mutation> chunk) throws IOException {
-      long chunkBytes = 0;
-      for (Mutation mutation : chunk) {
-        chunkBytes += mutation.estimatedBytes();
+    public void accept(List<Mutation> group) throws IOException {
+      long groupBytes = 0;
+      for (Mutation mutation : group) {
+        groupBytes += mutation.estimatedBytes();
       }
-      totalBytes += chunkBytes;
-      if (!current.isEmpty() && currentBytes + chunkBytes > batchBytes) {
+      totalBytes += groupBytes;
+      if (!current.isEmpty() && currentBytes + groupBytes > batchBytes) {
         if (!intentWritten) {
           writeIntent();
         }
         writeData();
       }
-      current.addAll(chunk);
-      currentBytes += chunkBytes;
+      current.addAll(group);
+      currentBytes += groupBytes;
       if (intentWritten && currentBytes >= batchBytes) {
         writeData();
       }

@@ -1,6 +1,7 @@
 package org.tron.core.db2.archive.serving;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.blocks;
@@ -12,6 +13,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -117,10 +119,60 @@ public class ServingIndexParallelBuildTest {
     assertTrue(parallel.writes.isEmpty());
     assertEquals(serial.gets, parallel.gets);
     assertEquals(serialBatch.size(), parallelBatch.size());
-    for (int index = 0; index < serialBatch.size(); index++) {
-      assertEquals(serialBatch.get(index).estimatedBytes(),
-          parallelBatch.get(index).estimatedBytes());
+    // Delivery order is the workers' completion order, so compare the delivered mutations
+    // as a multiset of encoded sizes rather than index by index.
+    List<Long> serialSizes = encodedSizes(serialBatch);
+    List<Long> parallelSizes = encodedSizes(parallelBatch);
+    Collections.sort(serialSizes);
+    Collections.sort(parallelSizes);
+    assertEquals(serialSizes, parallelSizes);
+  }
+
+  @Test
+  public void finishedKeysDeliverWhileASlowKeyIsStillPreparing() throws Exception {
+    Path directory = temporaryFolder.newFolder().toPath();
+    ServingIndexIncrementalPlan window;
+    try (ServingIndexStore store = ServingIndexStore.open(directory, Engine.ROCKSDB,
+        1, hash(0), false, 1)) {
+      window = plan(store, blocks(1, 3, 8));
     }
+    Map<ExactKey, long[]> changeMap = changes(window);
+
+    // The worker claiming key 0 parks inside its meta read; every other key must still
+    // reach the sink while key 0 is in flight, which order-preserving delivery never could.
+    StubWriter stub = new StubWriter();
+    stub.parkFor(metaKeyHex(0), 3000);
+    CountDownLatch delivered = new CountDownLatch(1);
+    List<Mutation> batch = new CopyOnWriteArrayList<>();
+    Thread builder = new Thread(() -> {
+      try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(4)) {
+        appender.appendAll(stub, changeMap, Long.MAX_VALUE, group -> {
+          batch.addAll(group);
+          delivered.countDown();
+        });
+      } catch (IOException failure) {
+        throw new IllegalStateException(failure);
+      }
+    });
+    builder.start();
+    try {
+      assertTrue("no key was delivered while the slow key was still preparing",
+          delivered.await(1500, TimeUnit.MILLISECONDS));
+    } finally {
+      builder.join(30000);
+      assertFalse(builder.isAlive());
+    }
+    assertTrue(stub.writes.isEmpty());
+    assertFalse(batch.isEmpty());
+  }
+
+  /** Encoded sizes of the delivered mutations, for order-insensitive comparisons. */
+  private static List<Long> encodedSizes(List<Mutation> mutations) {
+    List<Long> sizes = new ArrayList<>(mutations.size());
+    for (Mutation mutation : mutations) {
+      sizes.add(mutation.estimatedBytes());
+    }
+    return sizes;
   }
 
   @Test
