@@ -77,12 +77,12 @@ public class ServingIndexAccumulationTest {
       }
     }
     try (ServingIndexStore atomic = open(atomicDirectory)) {
-      atomic.commit(accumulateWindows(atomic, windows()).toAppend(), false, Long.MAX_VALUE);
+      atomic.commit(accumulateWindows(atomic, windows()), false, Long.MAX_VALUE);
     }
     // A flush streamed through intent plus data batches must leave the identical database,
     // including the absence of any leftover flush intent key.
     try (ServingIndexStore streamed = open(streamedDirectory)) {
-      streamed.commit(accumulateWindows(streamed, windows()).toAppend(), false, 1);
+      streamed.commit(accumulateWindows(streamed, windows()), false, 1);
     }
     reopenAndCompare(perWindowDirectory, atomicDirectory);
     reopenAndCompare(perWindowDirectory, streamedDirectory);
@@ -152,11 +152,11 @@ public class ServingIndexAccumulationTest {
     Path crashedDirectory = temporaryFolder.newFolder().toPath();
     try (ServingIndexStore clean = open(cleanDirectory)) {
       clean.commit(plan(clean, blocks(1, 511, 8)), false);
-      clean.commit(accumulate(clean, flushWindow()).toAppend(), false, Long.MAX_VALUE);
+      clean.commit(accumulate(clean, flushWindow()), false, Long.MAX_VALUE);
     }
     try (ServingIndexStore crashed = open(crashedDirectory)) {
       crashed.commit(plan(crashed, blocks(1, 511, 8)), false);
-      ServingIndexStore.GroupedAppend append = accumulate(crashed, flushWindow()).toAppend();
+      ServingIndexStore.GroupedAppend append = accumulate(crashed, flushWindow());
       crashed.setFlushFaultHook(point.hook());
       try {
         crashed.commit(append, false, 1);
@@ -172,7 +172,7 @@ public class ServingIndexAccumulationTest {
       assertEquals(511, intent.baseThrough());
       assertEquals(514, intent.targetThrough());
       assertEquals(25, intent.keyChanges());
-      recovered.recoverFlush(accumulate(recovered, flushWindow()).toAppend(), intent,
+      recovered.recoverFlush(accumulate(recovered, flushWindow()), intent,
           Long.MAX_VALUE);
       assertNull(recovered.pendingFlushIntent());
       assertEquals(514, recovered.indexedThrough());
@@ -186,11 +186,11 @@ public class ServingIndexAccumulationTest {
     Path crashedDirectory = temporaryFolder.newFolder().toPath();
     try (ServingIndexStore clean = open(cleanDirectory)) {
       clean.commit(plan(clean, blocks(1, 511, 8)), false);
-      clean.commit(accumulate(clean, flushWindow()).toAppend(), false, Long.MAX_VALUE);
+      clean.commit(accumulate(clean, flushWindow()), false, Long.MAX_VALUE);
     }
     try (ServingIndexStore crashed = open(crashedDirectory)) {
       crashed.commit(plan(crashed, blocks(1, 511, 8)), false);
-      ServingIndexStore.GroupedAppend append = accumulate(crashed, flushWindow()).toAppend();
+      ServingIndexStore.GroupedAppend append = accumulate(crashed, flushWindow());
       crashed.setFlushFaultHook(InjectionPoint.AFTER_FIRST_DATA.hook());
       try {
         crashed.commit(append, false, 1);
@@ -213,7 +213,7 @@ public class ServingIndexAccumulationTest {
         }
       });
       try {
-        recovering.recoverFlush(accumulate(recovering, flushWindow()).toAppend(), intent, 1);
+        recovering.recoverFlush(accumulate(recovering, flushWindow()), intent, 1);
         fail("expected the injected recovery crash");
       } catch (IOException expected) {
         assertEquals("injected recovery AFTER_SECOND_DATA", expected.getMessage());
@@ -224,7 +224,7 @@ public class ServingIndexAccumulationTest {
         Engine.ROCKSDB, 1, hash(0), false, 1)) {
       ServingIndexStore.FlushIntent intent = recovered.pendingFlushIntent();
       assertNotNull(intent);
-      recovered.recoverFlush(accumulate(recovered, flushWindow()).toAppend(), intent,
+      recovered.recoverFlush(accumulate(recovered, flushWindow()), intent,
           Long.MAX_VALUE);
       assertNull(recovered.pendingFlushIntent());
       assertEquals(514, recovered.indexedThrough());
@@ -255,7 +255,7 @@ public class ServingIndexAccumulationTest {
         }
       });
       try {
-        store.commit(accumulate(store, blocks(21, 3, 4)).toAppend(), false, 1);
+        store.commit(accumulate(store, blocks(21, 3, 4)), false, 1);
         fail("expected the injected crash");
       } catch (IOException expected) {
         assertEquals("injected BEFORE_FINAL", expected.getMessage());
@@ -269,7 +269,7 @@ public class ServingIndexAccumulationTest {
       assertEquals(20, ServingIndexStore.readDescriptor(before).indexedThrough());
       assertEquals(OptionalLong.of(1L),
           view(directory, before).firstChangeAfter("code", intKey(0), 0, 20));
-      recovered.recoverFlush(accumulate(recovered, blocks(21, 3, 4)).toAppend(), intent,
+      recovered.recoverFlush(accumulate(recovered, blocks(21, 3, 4)), intent,
           Long.MAX_VALUE);
       assertEquals(23, recovered.indexedThrough());
     }
@@ -310,7 +310,7 @@ public class ServingIndexAccumulationTest {
         }
         store.setFlushFaultHook(InjectionPoint.AFTER_FIRST_DATA.hook());
         try {
-          store.commit(accumulator.seal().toAppend(), false, 1);
+          store.commit(accumulator.seal(), false, 1);
           fail("expected the injected crash");
         } catch (IOException expected) {
           assertEquals("injected AFTER_FIRST_DATA", expected.getMessage());
@@ -337,12 +337,12 @@ public class ServingIndexAccumulationTest {
     Path inlineCrashed = temporaryFolder.newFolder().toPath();
     try (ServingIndexStore clean = open(inlineClean)) {
       clean.commit(plan(clean, blocks(1, 3, 2)), false);
-      clean.commit(accumulate(clean, blocks(4, 1, 2)).toAppend(), false, Long.MAX_VALUE);
+      clean.commit(accumulate(clean, blocks(4, 1, 2)), false, Long.MAX_VALUE);
     }
     try (ServingIndexStore crashed = open(inlineCrashed)) {
       crashed.commit(plan(crashed, blocks(1, 3, 2)), false);
       ServingIndexStore.GroupedAppend append =
-          accumulate(crashed, blocks(4, 1, 2)).toAppend();
+          accumulate(crashed, blocks(4, 1, 2));
       crashed.setFlushFaultHook(InjectionPoint.BEFORE_FINAL.hook());
       try {
         crashed.commit(append, false, 1);
@@ -353,7 +353,7 @@ public class ServingIndexAccumulationTest {
     }
     try (ServingIndexStore recovered = ServingIndexStore.open(inlineCrashed,
         Engine.ROCKSDB, 1, hash(0), false, 1)) {
-      recovered.recoverFlush(accumulate(recovered, blocks(4, 1, 2)).toAppend(),
+      recovered.recoverFlush(accumulate(recovered, blocks(4, 1, 2)),
           recovered.pendingFlushIntent(), Long.MAX_VALUE);
       assertEquals(4, recovered.indexedThrough());
     }
@@ -366,11 +366,11 @@ public class ServingIndexAccumulationTest {
     rollWindow.set(0, diff(4097, Arrays.asList(intKey(0), intKey(200))));
     try (ServingIndexStore clean = open(rollClean)) {
       clean.commit(plan(clean, blocks(1, 4096, 1)), false);
-      clean.commit(accumulate(clean, rollWindow).toAppend(), false, Long.MAX_VALUE);
+      clean.commit(accumulate(clean, rollWindow), false, Long.MAX_VALUE);
     }
     try (ServingIndexStore crashed = open(rollCrashed)) {
       crashed.commit(plan(crashed, blocks(1, 4096, 1)), false);
-      ServingIndexStore.GroupedAppend append = accumulate(crashed, rollWindow).toAppend();
+      ServingIndexStore.GroupedAppend append = accumulate(crashed, rollWindow);
       crashed.setFlushFaultHook(InjectionPoint.BEFORE_FINAL.hook());
       try {
         crashed.commit(append, false, 1);
@@ -381,7 +381,7 @@ public class ServingIndexAccumulationTest {
     }
     try (ServingIndexStore recovered = ServingIndexStore.open(rollCrashed,
         Engine.ROCKSDB, 1, hash(0), false, 1)) {
-      recovered.recoverFlush(accumulate(recovered, rollWindow).toAppend(),
+      recovered.recoverFlush(accumulate(recovered, rollWindow),
           recovered.pendingFlushIntent(), Long.MAX_VALUE);
       assertEquals(8196, recovered.indexedThrough());
     }
@@ -402,7 +402,7 @@ public class ServingIndexAccumulationTest {
     seedLegacySoloResidue(crashedDirectory);
     try (ServingIndexStore crashed = open(crashedDirectory)) {
       ServingIndexStore.GroupedAppend append =
-          accumulate(crashed, blocks(5, 2, 2)).toAppend();
+          accumulate(crashed, blocks(5, 2, 2));
       crashed.setFlushFaultHook(InjectionPoint.AFTER_INTENT.hook());
       try {
         crashed.commit(append, false, 1);
@@ -414,7 +414,7 @@ public class ServingIndexAccumulationTest {
     try (ServingIndexStore recovered = ServingIndexStore.open(crashedDirectory,
         Engine.ROCKSDB, 1, hash(0), false, 1)) {
       assertNotNull(recovered.pendingFlushIntent());
-      recovered.recoverFlush(accumulate(recovered, blocks(5, 2, 2)).toAppend(),
+      recovered.recoverFlush(accumulate(recovered, blocks(5, 2, 2)),
           recovered.pendingFlushIntent(), Long.MAX_VALUE);
       assertEquals(6, recovered.indexedThrough());
     }
@@ -444,23 +444,23 @@ public class ServingIndexAccumulationTest {
     Path parallelDirectory = temporaryFolder.newFolder().toPath();
     try (ServingIndexStore clean = open(cleanDirectory)) {
       clean.commit(plan(clean, blocks(1, 511, 8)), false);
-      clean.commit(accumulate(clean, flushWindow()).toAppend(), false, Long.MAX_VALUE);
+      clean.commit(accumulate(clean, flushWindow()), false, Long.MAX_VALUE);
     }
     System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY, "4");
     try {
       // A streamed flush assembled by parallel workers matches the serial atomic result.
       try (ServingIndexStore parallel = open(parallelDirectory)) {
         parallel.commit(plan(parallel, blocks(1, 511, 8)), false);
-        parallel.commit(accumulate(parallel, flushWindow()).toAppend(), false, 1);
+        parallel.commit(accumulate(parallel, flushWindow()), false, 1);
       }
       reopenAndCompare(cleanDirectory, parallelDirectory);
 
       // A sink-side failure under parallelism must not leave spinning workers behind.
       try (ServingIndexStore crashed = open(parallelDirectory)) {
-        crashed.commit(accumulate(crashed, blocks(515, 64, 8)).toAppend(), false,
+        crashed.commit(accumulate(crashed, blocks(515, 64, 8)), false,
             Long.MAX_VALUE);
         ServingIndexStore.GroupedAppend append =
-            accumulate(crashed, blocks(579, 8, 16)).toAppend();
+            accumulate(crashed, blocks(579, 8, 16));
         crashed.setFlushFaultHook(InjectionPoint.AFTER_INTENT.hook());
         long started = System.nanoTime();
         try {
@@ -495,7 +495,7 @@ public class ServingIndexAccumulationTest {
     return flush;
   }
 
-  private static ServingChangeAccumulator.Sealed accumulateWindows(ServingIndexStore store,
+  private static ServingIndexStore.GroupedAppend accumulateWindows(ServingIndexStore store,
       List<List<BlockReverseDiff>> windows) throws IOException {
     ServingChangeAccumulator accumulator = accumulator(store);
     for (List<BlockReverseDiff> window : windows) {
@@ -504,7 +504,7 @@ public class ServingIndexAccumulationTest {
     return accumulator.seal();
   }
 
-  private static ServingChangeAccumulator.Sealed accumulate(ServingIndexStore store,
+  private static ServingIndexStore.GroupedAppend accumulate(ServingIndexStore store,
       List<BlockReverseDiff> window) throws IOException {
     ServingChangeAccumulator accumulator = accumulator(store);
     addWindow(accumulator, store, window);

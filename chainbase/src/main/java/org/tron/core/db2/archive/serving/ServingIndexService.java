@@ -573,15 +573,15 @@ public final class ServingIndexService implements AutoCloseable {
         replay.addBlock(block.getDiff(), block.getStepDigest());
       }
     }
-    ServingChangeAccumulator.Sealed sealed = replay.seal();
-    if (sealed.indexedThrough() != intent.targetThrough()
-        || !Arrays.equals(sealed.headHash(), intent.targetHash())
-        || !Arrays.equals(sealed.sourceDigest(), intent.targetSourceDigest())
-        || sealed.keyChanges() != intent.keyChanges()) {
+    ServingIndexStore.GroupedAppend replayed = replay.seal();
+    if (replayed.indexedThrough() != intent.targetThrough()
+        || !Arrays.equals(replayed.headHash(), intent.targetHash())
+        || !Arrays.equals(replayed.sourceDigest(), intent.targetSourceDigest())
+        || replayed.keyChanges() != intent.keyChanges()) {
       throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
           "Serving flush recovery replay differs from the durable intent");
     }
-    opened.recoverFlush(sealed.toAppend(), intent, config.getDataBatchBytes());
+    opened.recoverFlush(replayed, intent, config.getDataBatchBytes());
   }
 
   /**
@@ -672,22 +672,21 @@ public final class ServingIndexService implements AutoCloseable {
 
   /** One sealed accumulation through the single durable commit path, then the tail checks. */
   private void flushRound(long w) throws IOException {
-    ServingChangeAccumulator.Sealed sealed = accumulator.seal();
+    ServingIndexStore.GroupedAppend append = accumulator.seal();
     accumulator = null;
     roundTarget = -1;
-    boolean split = sealed.indexedThrough() < w;
+    boolean split = append.indexedThrough() < w;
     long started = System.nanoTime();
     try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
-        sealed.indexedFrom(), sealed.indexedThrough())) {
-      store.commit(sealed.toAppend(), sealed.indexedThrough() == w,
-          config.getDataBatchBytes());
+        append.indexedFrom(), append.indexedThrough())) {
+      store.commit(append, append.indexedThrough() == w, config.getDataBatchBytes());
       timing.succeeded();
     }
-    hooks.afterCommit(sealed.indexedFrom() + 1, sealed.indexedThrough());
+    hooks.afterCommit(append.indexedFrom() + 1, append.indexedThrough());
     batchCounters[split ? 1 : 0]++;
     ServingIndexTiming.batch(split ? "split" : "normal");
     logger.info("Serving index batch: state={}, from={}, through={}, changes={}, durationMs={}",
-        state, sealed.indexedFrom(), sealed.indexedThrough(), sealed.keyChanges(),
+        state, append.indexedFrom(), append.indexedThrough(), append.keyChanges(),
         (System.nanoTime() - started) / 1_000_000L);
     if (store.indexedThrough() == w) {
       pendingSinceMillis = 0;

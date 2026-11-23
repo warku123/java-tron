@@ -115,16 +115,17 @@ final class ServingChangeAccumulator {
     return readThrough;
   }
 
-  Sealed seal() {
+  /** Seals the accumulation into the store's flush input; the accumulator is spent afterwards. */
+  ServingIndexStore.GroupedAppend seal() {
     if (sealed) {
       throw new IllegalStateException("Serving accumulation is already sealed");
     }
     sealed = true;
-    Map<ExactKey, long[]> sealed = new LinkedHashMap<>();
-    changes.forEach((key, epochs) -> sealed.put(key, epochs.toArray()));
-    return new Sealed(baseThrough, baseHash, readThrough, readHash, rolledDigest,
-        lastStepDigest == null ? baseLatestIdentity : lastStepDigest, pendingChanges,
-        sealed, participants);
+    Map<ExactKey, long[]> changes = new LinkedHashMap<>();
+    this.changes.forEach((key, epochs) -> changes.put(key, epochs.toArray()));
+    return new ServingIndexStore.GroupedAppend(baseThrough, baseHash, readThrough, readHash,
+        participants, rolledDigest, lastStepDigest == null ? baseLatestIdentity : lastStepDigest,
+        pendingChanges, changes);
   }
 
   private static byte[] requireHash(byte[] hash, String name) {
@@ -157,55 +158,4 @@ final class ServingChangeAccumulator {
     }
   }
 
-  /** The immutable flush input; {@link #toAppend()} feeds the store commit directly. */
-  static final class Sealed {
-    private final long indexedFrom;
-    private final byte[] indexedFromHash;
-    private final long indexedThrough;
-    private final byte[] headHash;
-    private final byte[] sourceDigest;
-    private final byte[] latestStepDigest;
-    private final long keyChanges;
-    private final Map<ExactKey, long[]> changes;
-    private final List<String> participants;
-
-    private Sealed(long indexedFrom, byte[] indexedFromHash, long indexedThrough,
-        byte[] headHash, byte[] sourceDigest, byte[] latestStepDigest, long keyChanges,
-        Map<ExactKey, long[]> changes, List<String> participants) {
-      this.indexedFrom = indexedFrom;
-      this.indexedFromHash = indexedFromHash;
-      this.indexedThrough = indexedThrough;
-      this.headHash = headHash;
-      this.sourceDigest = sourceDigest;
-      this.latestStepDigest = latestStepDigest;
-      this.keyChanges = keyChanges;
-      this.changes = changes;
-      this.participants = participants;
-    }
-
-    ServingIndexStore.GroupedAppend toAppend() {
-      return new ServingIndexStore.GroupedAppend(indexedFrom, indexedFromHash, indexedThrough,
-          headHash, participants, sourceDigest, latestStepDigest, keyChanges, changes);
-    }
-
-    long indexedFrom() {
-      return indexedFrom;
-    }
-
-    long indexedThrough() {
-      return indexedThrough;
-    }
-
-    byte[] headHash() {
-      return headHash.clone();
-    }
-
-    byte[] sourceDigest() {
-      return sourceDigest.clone();
-    }
-
-    long keyChanges() {
-      return keyChanges;
-    }
-  }
 }

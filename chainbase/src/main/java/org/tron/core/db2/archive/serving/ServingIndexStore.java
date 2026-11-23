@@ -717,6 +717,26 @@ final class ServingIndexStore implements Closeable {
       this.changes = java.util.Collections.unmodifiableMap(
           new LinkedHashMap<>(Objects.requireNonNull(changes, "changes")));
     }
+
+    long indexedFrom() {
+      return indexedFrom;
+    }
+
+    long indexedThrough() {
+      return indexedThrough;
+    }
+
+    byte[] headHash() {
+      return headHash.clone();
+    }
+
+    byte[] sourceDigest() {
+      return sourceDigest.clone();
+    }
+
+    long keyChanges() {
+      return keyChanges;
+    }
   }
 
   /**
