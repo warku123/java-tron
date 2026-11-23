@@ -36,8 +36,9 @@ import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Mutation;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
- * Parallel per-key preparation keeps batches byte-identical to the serial path: workers only
- * read and encode, the build thread keeps the single atomic write, failures write nothing.
+ * Parallel chunked preparation keeps the final index rows identical to the serial path:
+ * workers only read and encode contiguous key chunks, the build thread performs every write,
+ * and completed chunks may reach the sink in completion order.
  */
 public class ServingIndexParallelBuildTest {
   @Rule
@@ -64,13 +65,15 @@ public class ServingIndexParallelBuildTest {
     }
   }
 
-  /** INLINE, promotion, paged appends, an empty window and a page roll (5000 epochs). */
+  /** INLINE, promotion, paged appends, an empty window, a page roll and a multi-key chunk. */
   private static void commitWindows(ServingIndexStore store) throws IOException {
     store.commit(plan(store, blocks(1, 4, 12)), false);
     store.commit(plan(store, blocks(5, 2, 12)), false);
     store.commit(plan(store, blocks(7, 3, 12)), false);
     store.commit(plan(store, blocks(10, 1, 0)), false);
     store.commit(plan(store, blocks(11, 5000, 1)), false);
+    // 72 unique keys over 4 workers make chunkKeys 2, so parallel delivery works in chunks.
+    store.commit(plan(store, blocks(5011, 2, 72)), false);
   }
 
   @Test
@@ -129,25 +132,24 @@ public class ServingIndexParallelBuildTest {
   }
 
   @Test
-  public void finishedKeysDeliverWhileASlowKeyIsStillPreparing() throws Exception {
-    Path directory = temporaryFolder.newFolder().toPath();
-    ServingIndexIncrementalPlan window;
-    try (ServingIndexStore store = ServingIndexStore.open(directory, Engine.ROCKSDB,
-        1, hash(0), false, 1)) {
-      window = plan(store, blocks(1, 3, 8));
+  public void laterChunksDeliverWhileASlowChunkIsStillPreparing() throws Exception {
+    // 40 keys over 2 workers make chunkKeys 2, so the parked read stalls the whole first
+    // chunk; every later chunk must still reach the sink while chunk 0 is in flight, which
+    // order-preserving delivery never could.
+    Map<ExactKey, long[]> changeMap = new LinkedHashMap<>();
+    for (int key = 0; key < 40; key++) {
+      changeMap.put(new ExactKey("code", ByteBuffer.allocate(4).putInt(key).array()),
+          new long[] {100 + key});
     }
-    Map<ExactKey, long[]> changeMap = changes(window);
 
-    // The worker claiming key 0 parks inside its meta read; every other key must still
-    // reach the sink while key 0 is in flight, which order-preserving delivery never could.
     StubWriter stub = new StubWriter();
     stub.parkFor(metaKeyHex(0), 3000);
     CountDownLatch delivered = new CountDownLatch(1);
     List<Mutation> batch = new CopyOnWriteArrayList<>();
     Thread builder = new Thread(() -> {
-      try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(4)) {
-        appender.appendAll(stub, changeMap, Long.MAX_VALUE, group -> {
-          batch.addAll(group);
+      try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(2)) {
+        appender.appendAll(stub, changeMap, Long.MAX_VALUE, chunk -> {
+          batch.addAll(chunk);
           delivered.countDown();
         });
       } catch (IOException failure) {
@@ -156,14 +158,14 @@ public class ServingIndexParallelBuildTest {
     });
     builder.start();
     try {
-      assertTrue("no key was delivered while the slow key was still preparing",
+      assertTrue("no chunk was delivered while the slow chunk was still preparing",
           delivered.await(1500, TimeUnit.MILLISECONDS));
     } finally {
       builder.join(30000);
       assertFalse(builder.isAlive());
     }
     assertTrue(stub.writes.isEmpty());
-    assertFalse(batch.isEmpty());
+    assertEquals(40, batch.size());
   }
 
   /** Encoded sizes of the delivered mutations, for order-insensitive comparisons. */

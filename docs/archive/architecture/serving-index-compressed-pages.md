@@ -106,15 +106,16 @@ intent 从 History 重放同一区间：仍处旧进度的 key 正常追加，�
 
 正式提交按聚合后的 key 读取 KeyMeta，分页 key 再读目录和尾页。不同 key 由有界 worker
 并行准备（`tron.archive.serving.buildThreads`，默认 1 即原串行路径）：worker 从共享游标
-动态领取下一个 key，只读 KeyMeta／目录／尾页并产出该 key 的完整 mutation 组，同一 key
-的全部高度仍在单个 worker 上按序追加；完成顺序即交付顺序，慢 key 不阻塞已完成的 key，
-构建线程把收到的 key 原子组按 `dataBatchBytes` 合批写库，最终索引与串行构建一致。
-不超预算的 flush 仍一次同步原子提交索引数据、coverage 和进度；超过预算的流式路径见
-上节。worker 或写入失败即停止派发，等待在途读取退出后向上传播；已落盘的数据子批由
-重开后的 intent 恢复处理。不再写新的 SOLO 分块。旧 SOLO 仍按 KeyMeta.last 做 R-IDEM，
-目录模式重放时还会校验目录。原生 snapshot 固定目录、页及读取上界，`I+1` 残留仍不可见。
-与 Geth 对齐的是无 extension 分页、Uvarint/restart 编码、后继查找策略和按 key 派活的
-并发形态，不是落盘格式、批次、进度发布或恢复机制。
+动态领取一段连续的 key（每段默认约 `key 数 / (worker 数 × 8)`，上限 1024），只读
+KeyMeta／目录／尾页并产出该段内每个 key 的完整 mutation 组，同一 key 的全部高度仍在
+单个 worker 上按序追加；chunk 完成顺序即交付顺序，慢 chunk 不阻塞已完成的 chunk，
+构建线程把收到的 chunk 按 `dataBatchBytes` 合批写库（单 key 不拆批），最终索引与串行
+构建一致。不超预算的 flush 仍一次同步原子提交索引数据、coverage 和进度；超过预算的
+流式路径见上节。worker 或写入失败即停止派发，等待在途读取退出后向上传播；已落盘的
+数据子批由重开后的 intent 恢复处理。不再写新的 SOLO 分块。旧 SOLO 仍按 KeyMeta.last
+做 R-IDEM，目录模式重放时还会校验目录。原生 snapshot 固定目录、页及读取上界，`I+1`
+残留仍不可见。与 Geth 对齐的是无 extension 分页、Uvarint/restart 编码、后继查找策略
+和按 key 派活的并发形态，不是落盘格式、批次、进度发布或恢复机制。
 
 按与 Blade 确认的实施口径，保留 `VERSION=4`、`EXACT_VERSION=5`，不新增 descriptor
 版本，不增加多版本分类函数，也不增加打开时升级 descriptor 的维护写入。
